@@ -71,6 +71,10 @@ pub struct Cli {
     #[arg(long = "no-alt-screen", default_value_t = false)]
     pub no_alt_screen: bool,
 
+    /// Internal: Multi-AI Code IM structured output bridge endpoint.
+    #[arg(long = "multi-ai-code-im-ipc", hide = true)]
+    pub multi_ai_code_im_ipc: Option<String>,
+
     #[clap(skip)]
     pub config_overrides: CliConfigOverrides,
 }
