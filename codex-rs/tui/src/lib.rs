@@ -148,6 +148,7 @@ mod mention_codec;
 mod model_catalog;
 mod model_migration;
 mod motion;
+mod multi_ai_code_im_bridge;
 mod multi_agents;
 mod named_session_lookup;
 mod notifications;
@@ -1693,8 +1694,10 @@ async fn run_ratatui_app(
         prompt,
         shared,
         no_alt_screen,
+        multi_ai_code_im_ipc,
         ..
     } = cli;
+    multi_ai_code_im_bridge::init(multi_ai_code_im_ipc);
     let images = shared.into_inner().images;
 
     let use_alt_screen = determine_alt_screen_mode(no_alt_screen, config.tui_alternate_screen);
