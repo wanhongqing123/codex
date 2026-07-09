@@ -278,6 +278,9 @@ impl ChatWidget {
                 AgentMessageContent::Text { text } => message.push_str(text),
             }
         }
+        if !from_replay {
+            crate::multi_ai_code_im_bridge::send_assistant_text(&message, Some(item.id.as_str()));
+        }
         let parsed = parse_assistant_markdown(&message, self.config.cwd.as_path());
         self.finalize_completed_assistant_message(
             (!parsed.visible_markdown.is_empty()).then_some(parsed.visible_markdown.as_str()),
