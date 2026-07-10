@@ -426,7 +426,9 @@ pub(crate) fn init() -> Result<InitializedTerminal> {
     };
 
     #[cfg(unix)]
-    crate::terminal_palette::set_default_colors_from_startup_probe(startup_probe.default_colors);
+    crate::terminal_palette::set_default_colors_from_startup_probe(
+        forced_default_colors_from_env().or(startup_probe.default_colors),
+    );
 
     #[cfg(unix)]
     let cursor_pos = match startup_probe.cursor_position {
@@ -479,8 +481,43 @@ fn detect_keyboard_enhancement_supported() -> bool {
     supports_keyboard_enhancement().unwrap_or(/*default*/ false)
 }
 
+/// Parse an `RRGGBB` (optionally `#`-prefixed) hex string into an 8-bit RGB tuple.
+fn parse_hex_rgb(value: &str) -> Option<(u8, u8, u8)> {
+    let hex = value.trim().trim_start_matches('#');
+    if hex.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some((r, g, b))
+}
+
+/// Host apps embedding the TUI (e.g. multi-ai-code desktop) can force the
+/// terminal default colors via env, bypassing the OSC 10/11 probe which is
+/// unreliable under Windows ConPTY. This makes light/dark theme selection
+/// deterministic instead of falling back to a dark assumption on a light host.
+fn forced_default_colors_from_env() -> Option<crate::terminal_probe::DefaultColors> {
+    let bg = parse_hex_rgb(&std::env::var("CODEX_DEFAULT_TERMINAL_BG").ok()?)?;
+    let fg = std::env::var("CODEX_DEFAULT_TERMINAL_FG")
+        .ok()
+        .and_then(|value| parse_hex_rgb(&value))
+        .unwrap_or_else(|| {
+            if crate::color::is_light(bg) {
+                (0, 0, 0)
+            } else {
+                (255, 255, 255)
+            }
+        });
+    Some(crate::terminal_probe::DefaultColors { fg, bg })
+}
+
 #[cfg(windows)]
 fn probe_windows_default_colors() {
+    if let Some(forced) = forced_default_colors_from_env() {
+        crate::terminal_palette::set_default_colors_from_startup_probe(Some(forced));
+        return;
+    }
     let started_at = std::time::Instant::now();
     match crate::terminal_probe::default_colors(crate::terminal_probe::DEFAULT_TIMEOUT) {
         Ok(colors) => {
