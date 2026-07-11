@@ -47,6 +47,7 @@ use codex_config::types::ApprovalsReviewer;
 use codex_features::Feature;
 use codex_plugin::PluginCapabilitySummary;
 use codex_protocol::config_types::CollaborationModeMask;
+use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Personality;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -225,6 +226,16 @@ pub(crate) enum AppEvent {
 
     /// Open the resume picker inside the running TUI session.
     OpenResumePicker,
+
+    /// Switch Codex collaboration mode from the Multi-AI Code IM control channel.
+    MultiAiCodeImSwitchMode {
+        mode: ModeKind,
+    },
+
+    /// Return the current Codex `/status` output to the Multi-AI Code IM control channel.
+    MultiAiCodeImStatus {
+        request_id: String,
+    },
 
     /// Open the Claude Code migration picker inside the running TUI session.
     OpenExternalAgentConfigMigration,

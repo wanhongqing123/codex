@@ -1072,6 +1072,9 @@ See the Codex keymap documentation for supported actions and examples."
             pending_plugin_enabled_writes: HashMap::new(),
             pending_hook_enabled_writes: HashMap::new(),
         };
+
+        crate::multi_ai_code_im_bridge::start_control_listener(app.app_event_tx.clone());
+
         if let Some(entry) = startup_hooks_browser {
             app.chat_widget.open_hooks_browser(entry);
         }

@@ -197,6 +197,7 @@ pub(crate) fn new_status_output_with_rate_limits(
     .0
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn new_status_output_with_rate_limits_handle(
     config: &Config,
@@ -217,6 +218,49 @@ pub(crate) fn new_status_output_with_rate_limits_handle(
     agents_summary: String,
     refreshing_rate_limits: bool,
 ) -> (CompositeHistoryCell, StatusHistoryHandle) {
+    let (cell, handle, _remote_im_text) =
+        new_status_output_with_rate_limits_handle_and_remote_im_text(
+            config,
+            runtime_model_provider_base_url,
+            remote_connection,
+            account_display,
+            token_info,
+            total_usage,
+            session_id,
+            thread_name,
+            forked_from,
+            rate_limits,
+            _plan_type,
+            now,
+            model_name,
+            collaboration_mode,
+            reasoning_effort_override,
+            agents_summary,
+            refreshing_rate_limits,
+        );
+    (cell, handle)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn new_status_output_with_rate_limits_handle_and_remote_im_text(
+    config: &Config,
+    runtime_model_provider_base_url: Option<&str>,
+    remote_connection: Option<&RemoteConnectionStatus>,
+    account_display: Option<&StatusAccountDisplay>,
+    token_info: Option<&TokenUsageInfo>,
+    total_usage: &TokenUsage,
+    session_id: &Option<ThreadId>,
+    thread_name: Option<String>,
+    forked_from: Option<ThreadId>,
+    rate_limits: &[RateLimitSnapshotDisplay],
+    _plan_type: Option<PlanType>,
+    now: DateTime<Local>,
+    model_name: &str,
+    collaboration_mode: Option<&str>,
+    reasoning_effort_override: Option<Option<ReasoningEffort>>,
+    agents_summary: String,
+    refreshing_rate_limits: bool,
+) -> (CompositeHistoryCell, StatusHistoryHandle, String) {
     let command = PlainHistoryCell::new(vec!["/status".magenta().into()]);
     let (card, handle) = StatusHistoryCell::new(
         config,
@@ -237,10 +281,12 @@ pub(crate) fn new_status_output_with_rate_limits_handle(
         agents_summary,
         refreshing_rate_limits,
     );
+    let remote_im_text = card.remote_im_status_text();
 
     (
         CompositeHistoryCell::new(vec![Box::new(command), Box::new(card)]),
         handle,
+        remote_im_text,
     )
 }
 
@@ -405,6 +451,180 @@ impl StatusHistoryCell {
             Span::from(window_fmt).dim(),
             Span::from(")").dim(),
         ])
+    }
+
+    fn account_value(&self) -> Option<String> {
+        self.account.as_ref().map(|account| match account {
+            StatusAccountDisplay::ChatGpt { email, plan } => match (email, plan) {
+                (Some(email), Some(plan)) => format!("{email} ({plan})"),
+                (Some(email), None) => email.clone(),
+                (None, Some(plan)) => plan.clone(),
+                (None, None) => "ChatGPT".to_string(),
+            },
+            StatusAccountDisplay::ApiKey => {
+                "API key configured (run codex login to use ChatGPT)".to_string()
+            }
+        })
+    }
+
+    fn model_value(&self) -> String {
+        if self.model_details.is_empty() {
+            self.model_name.clone()
+        } else {
+            format!("{} ({})", self.model_name, self.model_details.join(", "))
+        }
+    }
+
+    fn token_usage_text(&self) -> String {
+        format!(
+            "{} total ({} input + {} output)",
+            format_tokens_compact(self.token_usage.total),
+            format_tokens_compact(self.token_usage.input),
+            format_tokens_compact(self.token_usage.output)
+        )
+    }
+
+    fn context_window_text(&self) -> Option<String> {
+        let context = self.token_usage.context_window.as_ref()?;
+        Some(format!(
+            "{}% left ({} used / {})",
+            context.percent_remaining,
+            format_tokens_compact(context.tokens_in_context),
+            format_tokens_compact(context.window)
+        ))
+    }
+
+    fn remote_im_rate_limit_lines(&self, state: &StatusRateLimitState) -> Vec<String> {
+        match &state.rate_limits {
+            StatusRateLimitData::Available(rows) => {
+                if rows.is_empty() {
+                    vec!["Limits: not available for this account".to_string()]
+                } else {
+                    Self::remote_im_rate_limit_row_lines(rows)
+                }
+            }
+            StatusRateLimitData::Stale(rows) => {
+                let mut lines = Self::remote_im_rate_limit_row_lines(rows);
+                let warning = if state.refreshing_rate_limits {
+                    "limits may be stale - run /status again shortly."
+                } else {
+                    "limits may be stale - start new turn to refresh."
+                };
+                lines.push(format!("Warning: {warning}"));
+                lines
+            }
+            StatusRateLimitData::Unavailable => {
+                vec!["Limits: not available for this account".to_string()]
+            }
+            StatusRateLimitData::Missing => {
+                let value = if state.refreshing_rate_limits {
+                    "refresh requested; run /status again shortly."
+                } else {
+                    "data not available yet"
+                };
+                vec![format!("Limits: {value}")]
+            }
+        }
+    }
+
+    fn remote_im_rate_limit_row_lines(rows: &[StatusRateLimitRow]) -> Vec<String> {
+        let mut lines = Vec::new();
+        for row in rows {
+            match &row.value {
+                StatusRateLimitValue::Window {
+                    percent_used,
+                    resets_at,
+                    details,
+                } => {
+                    let percent_remaining = (100.0 - percent_used).clamp(0.0, 100.0);
+                    let mut value = format_status_limit_summary(percent_remaining);
+                    if let Some(resets_at) = resets_at.as_ref() {
+                        value.push_str(&format!(" (resets {resets_at})"));
+                    }
+                    lines.push(format!("{}: {}", row.label, value));
+                    if let Some(details) = details.as_ref() {
+                        lines.push(format!("  {details}"));
+                    }
+                }
+                StatusRateLimitValue::Text(text) => {
+                    if text.is_empty() {
+                        lines.push(row.label.clone());
+                    } else {
+                        lines.push(format!("{}: {}", row.label, text));
+                    }
+                }
+            }
+        }
+        lines
+    }
+
+    fn remote_im_status_text(&self) -> String {
+        let mut lines = vec![format!("OpenAI Codex (v{CODEX_CLI_VERSION})")];
+
+        if self.show_chatgpt_usage_link {
+            lines.push(format!(
+                "Usage: {CHATGPT_USAGE_URL} for up-to-date information on rate limits and credits"
+            ));
+        }
+
+        if let Some(remote_connection) = self.remote_connection.as_ref() {
+            lines.push(format!(
+                "Remote: {} ({})",
+                remote_connection.address, remote_connection.version
+            ));
+        }
+
+        lines.push(format!("Model: {}", self.model_value()));
+        if let Some(model_provider) = self.model_provider.as_ref() {
+            lines.push(format!("Model provider: {model_provider}"));
+        }
+        lines.push(format!(
+            "Directory: {}",
+            format_directory_display(&self.directory, None)
+        ));
+        lines.push(format!("Permissions: {}", self.permissions));
+
+        #[expect(clippy::expect_used)]
+        let agents_summary = self
+            .agents_summary
+            .read()
+            .expect("status history agents summary state poisoned")
+            .clone();
+        lines.push(format!("Agents.md: {agents_summary}"));
+
+        if let Some(account_value) = self.account_value() {
+            lines.push(format!("Account: {account_value}"));
+        }
+        if let Some(thread_name) = self.thread_name.as_deref().filter(|name| !name.is_empty()) {
+            lines.push(format!("Thread name: {thread_name}"));
+        }
+        if let Some(collab_mode) = self.collaboration_mode.as_ref() {
+            lines.push(format!("Collaboration mode: {collab_mode}"));
+        }
+        if let Some(session_id) = self.session_id.as_ref() {
+            lines.push(format!("Session: {session_id}"));
+        }
+        if self.session_id.is_some()
+            && let Some(forked_from) = self.forked_from.as_ref()
+        {
+            lines.push(format!("Forked from: {forked_from}"));
+        }
+
+        if !matches!(self.account, Some(StatusAccountDisplay::ChatGpt { .. })) {
+            lines.push(format!("Token usage: {}", self.token_usage_text()));
+        }
+        if let Some(context_window) = self.context_window_text() {
+            lines.push(format!("Context window: {context_window}"));
+        }
+
+        #[expect(clippy::expect_used)]
+        let rate_limit_state = self
+            .rate_limit_state
+            .read()
+            .expect("status history rate-limit state poisoned");
+        lines.extend(self.remote_im_rate_limit_lines(&rate_limit_state));
+
+        lines.join("\n")
     }
 
     fn rate_limit_lines(
@@ -720,17 +940,7 @@ impl HistoryCell for StatusHistoryCell {
             return Vec::new();
         }
 
-        let account_value = self.account.as_ref().map(|account| match account {
-            StatusAccountDisplay::ChatGpt { email, plan } => match (email, plan) {
-                (Some(email), Some(plan)) => format!("{email} ({plan})"),
-                (Some(email), None) => email.clone(),
-                (None, Some(plan)) => plan.clone(),
-                (None, None) => "ChatGPT".to_string(),
-            },
-            StatusAccountDisplay::ApiKey => {
-                "API key configured (run codex login to use ChatGPT)".to_string()
-            }
-        });
+        let account_value = self.account_value();
 
         let mut labels: Vec<String> = vec!["Model", "Directory", "Permissions", "Agents.md"]
             .into_iter()
@@ -815,12 +1025,16 @@ impl HistoryCell for StatusHistoryCell {
             lines.push(Line::from(Vec::<Span<'static>>::new()));
         }
 
-        let mut model_spans = vec![Span::from(self.model_name.clone())];
-        if !self.model_details.is_empty() {
-            model_spans.push(Span::from(" (").dim());
-            model_spans.push(Span::from(self.model_details.join(", ")).dim());
-            model_spans.push(Span::from(")").dim());
-        }
+        let model_spans = if self.model_details.is_empty() {
+            vec![Span::from(self.model_name.clone())]
+        } else {
+            vec![
+                Span::from(self.model_name.clone()),
+                Span::from(" (").dim(),
+                Span::from(self.model_details.join(", ")).dim(),
+                Span::from(")").dim(),
+            ]
+        };
 
         let directory_value = format_directory_display(&self.directory, Some(value_width));
 

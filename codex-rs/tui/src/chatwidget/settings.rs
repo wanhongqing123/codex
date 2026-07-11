@@ -673,6 +673,27 @@ impl ChatWidget {
         }
     }
 
+    pub(crate) fn switch_collaboration_mode_from_remote_im(&mut self, kind: ModeKind) -> bool {
+        if !self.collaboration_modes_enabled() {
+            self.add_info_message(
+                "Collaboration modes are disabled.".to_string(),
+                Some("Enable collaboration modes before switching from IM.".to_string()),
+            );
+            return false;
+        }
+
+        if let Some(mask) = collaboration_modes::mask_for_kind(self.model_catalog.as_ref(), kind) {
+            self.set_collaboration_mask_from_user_action(mask);
+            true
+        } else {
+            self.add_info_message(
+                format!("{} mode unavailable right now.", kind.display_name()),
+                /*hint*/ None,
+            );
+            false
+        }
+    }
+
     pub(crate) fn set_collaboration_mask_from_user_action(&mut self, mask: CollaborationModeMask) {
         self.set_collaboration_mask(mask);
         self.submit_collaboration_mode_settings_update();

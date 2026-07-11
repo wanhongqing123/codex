@@ -192,7 +192,7 @@ impl ChatWidget {
         &mut self,
         refreshing_rate_limits: bool,
         request_id: Option<u64>,
-    ) {
+    ) -> String {
         let default_usage = TokenUsage::default();
         let token_info = self.token_info.as_ref();
         let total_usage = token_info
@@ -222,29 +222,49 @@ impl ChatWidget {
             .collect();
         let agents_summary =
             crate::status::compose_agents_summary(&self.config, &self.instruction_source_paths);
-        let (cell, handle) = crate::status::new_status_output_with_rate_limits_handle(
-            &self.config,
-            self.runtime_model_provider_base_url.as_deref(),
-            self.remote_connection.as_ref(),
-            self.status_account_display.as_ref(),
-            token_info,
-            total_usage,
-            &self.thread_id,
-            self.thread_name.clone(),
-            self.forked_from,
-            rate_limit_snapshots.as_slice(),
-            self.plan_type,
-            Local::now(),
-            self.model_display_name(),
-            collaboration_mode,
-            reasoning_effort_override,
-            agents_summary,
-            refreshing_rate_limits,
-        );
+        let (cell, handle, remote_im_text) =
+            crate::status::new_status_output_with_rate_limits_handle_and_remote_im_text(
+                &self.config,
+                self.runtime_model_provider_base_url.as_deref(),
+                self.remote_connection.as_ref(),
+                self.status_account_display.as_ref(),
+                token_info,
+                total_usage,
+                &self.thread_id,
+                self.thread_name.clone(),
+                self.forked_from,
+                rate_limit_snapshots.as_slice(),
+                self.plan_type,
+                Local::now(),
+                self.model_display_name(),
+                collaboration_mode,
+                reasoning_effort_override,
+                agents_summary,
+                refreshing_rate_limits,
+            );
         if let Some(request_id) = request_id {
             self.refreshing_status_outputs.push((request_id, handle));
         }
         self.add_to_history(cell);
+        remote_im_text
+    }
+
+    pub(crate) fn add_status_output_from_remote_im(&mut self) -> String {
+        if self.should_prefetch_rate_limits() {
+            let request_id = self.next_status_refresh_request_id;
+            self.next_status_refresh_request_id =
+                self.next_status_refresh_request_id.wrapping_add(1);
+            let text =
+                self.add_status_output(/*refreshing_rate_limits*/ true, Some(request_id));
+            self.app_event_tx.send(AppEvent::RefreshRateLimits {
+                origin: RateLimitRefreshOrigin::StatusCommand { request_id },
+            });
+            return text;
+        }
+
+        self.add_status_output(
+            /*refreshing_rate_limits*/ false, /*request_id*/ None,
+        )
     }
 
     pub(crate) fn finish_status_rate_limit_refresh(

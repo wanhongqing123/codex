@@ -113,6 +113,19 @@ impl App {
                 // Leaving alt-screen may blank the inline viewport; force a redraw either way.
                 tui.frame_requester().schedule_frame();
             }
+            AppEvent::MultiAiCodeImSwitchMode { mode } => {
+                if self
+                    .chat_widget
+                    .switch_collaboration_mode_from_remote_im(mode)
+                {
+                    tui.frame_requester().schedule_frame();
+                }
+            }
+            AppEvent::MultiAiCodeImStatus { request_id } => {
+                let text = self.chat_widget.add_status_output_from_remote_im();
+                crate::multi_ai_code_im_bridge::send_control_result(&request_id, true, &text, None);
+                tui.frame_requester().schedule_frame();
+            }
             AppEvent::OpenExternalAgentConfigMigration => {
                 match crate::external_agent_config_migration_flow::handle_external_agent_config_migration_prompt(
                     tui,

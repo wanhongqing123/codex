@@ -145,8 +145,8 @@ mod mention_codec;
 mod model_catalog;
 mod model_migration;
 mod motion;
-mod multi_ai_code_im_bridge;
 mod multi_agents;
+mod multi_ai_code_im_bridge;
 mod notifications;
 #[cfg(any(not(debug_assertions), test))]
 mod npm_registry;
