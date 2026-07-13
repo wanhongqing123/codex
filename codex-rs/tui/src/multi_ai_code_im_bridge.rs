@@ -35,6 +35,7 @@ struct ControlPayload {
     kind: Option<String>,
     command: Option<String>,
     mode: Option<String>,
+    model: Option<String>,
     #[serde(rename = "requestId")]
     request_id: Option<String>,
 }
@@ -44,45 +45,70 @@ pub(crate) fn start_control_listener(app_event_tx: AppEventSender) {
         return;
     };
 
+    // Keep the IM control channel alive for the lifetime of the TUI session.
+    // A transient TCP disconnect should not permanently disable /status, /model,
+    // or mode-switch commands from remote IM.
     thread::spawn(move || {
-        let Ok(mut stream) = TcpStream::connect((config.host.as_str(), config.port)) else {
-            return;
-        };
-        let ready = json!({
-            "token": config.token,
-            "kind": "control_ready",
-        });
-        let _ = stream.write_all(format!("{ready}\n").as_bytes());
+        let mut first_attempt = true;
+        loop {
+            if !first_attempt {
+                thread::sleep(std::time::Duration::from_secs(3));
+            }
+            first_attempt = false;
 
-        let Ok(reader_stream) = stream.try_clone() else {
-            return;
-        };
-        let reader = BufReader::new(reader_stream);
-        for line in reader.lines().map_while(Result::ok) {
-            let Ok(payload) = serde_json::from_str::<ControlPayload>(&line) else {
+            let Ok(mut stream) = TcpStream::connect((config.host.as_str(), config.port)) else {
                 continue;
             };
-            if payload.token.as_deref() != Some(config.token.as_str())
-                || payload.kind.as_deref() != Some("control")
-            {
+            let ready = json!({
+                "token": config.token,
+                "kind": "control_ready",
+            });
+            if stream.write_all(format!("{ready}\n").as_bytes()).is_err() {
                 continue;
             }
-            match payload.command.as_deref() {
-                Some("switch_mode") => {
-                    let mode = match payload.mode.as_deref() {
-                        Some("plan") => ModeKind::Plan,
-                        Some("build") => ModeKind::Default,
-                        _ => continue,
-                    };
-                    app_event_tx.send(AppEvent::MultiAiCodeImSwitchMode { mode });
+
+            let Ok(reader_stream) = stream.try_clone() else {
+                continue;
+            };
+            let reader = BufReader::new(reader_stream);
+            for line in reader.lines().map_while(Result::ok) {
+                let Ok(payload) = serde_json::from_str::<ControlPayload>(&line) else {
+                    continue;
+                };
+                if payload.token.as_deref() != Some(config.token.as_str())
+                    || payload.kind.as_deref() != Some("control")
+                {
+                    continue;
                 }
-                Some("status") => {
-                    let Some(request_id) = payload.request_id else {
-                        continue;
-                    };
-                    app_event_tx.send(AppEvent::MultiAiCodeImStatus { request_id });
+                match payload.command.as_deref() {
+                    Some("switch_mode") => {
+                        let mode = match payload.mode.as_deref() {
+                            Some("plan") => ModeKind::Plan,
+                            Some("build") => ModeKind::Default,
+                            _ => continue,
+                        };
+                        app_event_tx.send(AppEvent::MultiAiCodeImSwitchMode {
+                            mode,
+                            request_id: payload.request_id,
+                        });
+                    }
+                    Some("status") => {
+                        let Some(request_id) = payload.request_id else {
+                            continue;
+                        };
+                        app_event_tx.send(AppEvent::MultiAiCodeImStatus { request_id });
+                    }
+                    Some("model") => {
+                        let Some(request_id) = payload.request_id else {
+                            continue;
+                        };
+                        app_event_tx.send(AppEvent::MultiAiCodeImModel {
+                            request_id,
+                            model: payload.model,
+                        });
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
     });
