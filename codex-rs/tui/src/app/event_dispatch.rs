@@ -113,17 +113,60 @@ impl App {
                 // Leaving alt-screen may blank the inline viewport; force a redraw either way.
                 tui.frame_requester().schedule_frame();
             }
-            AppEvent::MultiAiCodeImSwitchMode { mode } => {
-                if self
-                    .chat_widget
-                    .switch_collaboration_mode_from_remote_im(mode)
-                {
+            AppEvent::MultiAiCodeImSwitchMode { mode, request_id } => {
+                let result = self.chat_widget.switch_collaboration_mode_from_remote_im(mode);
+                // Report the real outcome so the host never claims a switch
+                // that the TUI actually refused (disabled modes, running turn...).
+                if let Some(request_id) = request_id.as_deref() {
+                    match &result {
+                        Ok(()) => crate::multi_ai_code_im_bridge::send_control_result(
+                            request_id, true, "", None,
+                        ),
+                        Err(message) => crate::multi_ai_code_im_bridge::send_control_result(
+                            request_id,
+                            false,
+                            "",
+                            Some(message),
+                        ),
+                    }
+                }
+                if result.is_ok() {
                     tui.frame_requester().schedule_frame();
                 }
             }
             AppEvent::MultiAiCodeImStatus { request_id } => {
                 let text = self.chat_widget.add_status_output_from_remote_im();
                 crate::multi_ai_code_im_bridge::send_control_result(&request_id, true, &text, None);
+                tui.frame_requester().schedule_frame();
+            }
+            AppEvent::MultiAiCodeImModel { request_id, model } => {
+                match self
+                    .chat_widget
+                    .model_control_output_from_remote_im(model.as_deref())
+                {
+                    Ok((text, switched_model)) => {
+                        crate::multi_ai_code_im_bridge::send_control_result(
+                            &request_id,
+                            true,
+                            &text,
+                            None,
+                        );
+                        if let Some(switched_model) = switched_model {
+                            self.sync_active_thread_model_setting(app_server, switched_model)
+                                .await;
+                            self.sync_active_thread_service_tier_to_cached_session()
+                                .await;
+                        }
+                    }
+                    Err(message) => {
+                        crate::multi_ai_code_im_bridge::send_control_result(
+                            &request_id,
+                            false,
+                            "",
+                            Some(&message),
+                        );
+                    }
+                }
                 tui.frame_requester().schedule_frame();
             }
             AppEvent::OpenExternalAgentConfigMigration => {

@@ -673,25 +673,143 @@ impl ChatWidget {
         }
     }
 
-    pub(crate) fn switch_collaboration_mode_from_remote_im(&mut self, kind: ModeKind) -> bool {
+    pub(crate) fn switch_collaboration_mode_from_remote_im(
+        &mut self,
+        kind: ModeKind,
+    ) -> Result<(), String> {
+        // Mirror the local guard in `submit_user_message_with_mode`: switching
+        // the collaboration mask mid-turn is not supported for local input, so
+        // remote IM input must not bypass it either.
+        if self.turn_lifecycle.agent_turn_running {
+            let message = "Cannot switch collaboration mode while a turn is running.".to_string();
+            self.add_info_message(message.clone(), /*hint*/ None);
+            return Err(message);
+        }
+
         if !self.collaboration_modes_enabled() {
+            let message = "Collaboration modes are disabled.".to_string();
             self.add_info_message(
-                "Collaboration modes are disabled.".to_string(),
+                message.clone(),
                 Some("Enable collaboration modes before switching from IM.".to_string()),
             );
-            return false;
+            return Err(message);
         }
 
         if let Some(mask) = collaboration_modes::mask_for_kind(self.model_catalog.as_ref(), kind) {
             self.set_collaboration_mask_from_user_action(mask);
-            true
+            Ok(())
         } else {
-            self.add_info_message(
-                format!("{} mode unavailable right now.", kind.display_name()),
-                /*hint*/ None,
-            );
-            false
+            let message = format!("{} mode unavailable right now.", kind.display_name());
+            self.add_info_message(message.clone(), /*hint*/ None);
+            Err(message)
         }
+    }
+
+    pub(crate) fn model_control_output_from_remote_im(
+        &mut self,
+        selection: Option<&str>,
+    ) -> Result<(String, Option<String>), String> {
+        let current_model = self.current_model().to_string();
+        let mut models = self
+            .model_catalog
+            .try_list_models()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|preset| preset.show_in_picker)
+            .collect::<Vec<_>>();
+        models.sort_by(|left, right| {
+            left.display_name
+                .cmp(&right.display_name)
+                .then_with(|| left.model.cmp(&right.model))
+        });
+
+        let Some(selection) = selection.map(str::trim).filter(|value| !value.is_empty()) else {
+            return Ok((Self::format_remote_im_model_list(&current_model, &models), None));
+        };
+
+        if self.turn_lifecycle.agent_turn_running {
+            let message = "Cannot switch model while a turn is running.".to_string();
+            self.add_info_message(message.clone(), /*hint*/ None);
+            return Err(message);
+        }
+
+        let selected_model = if let Ok(index) = selection.parse::<usize>() {
+            if index == 0 || index > models.len() {
+                return Ok((
+                    format!(
+                        "未找到序号 {selection} 对应的模型。\n\n{}",
+                        Self::format_remote_im_model_list(&current_model, &models)
+                    ),
+                    None,
+                ));
+            }
+            models[index - 1].model.clone()
+        } else {
+            let exact_matches = models
+                .iter()
+                .filter(|preset| {
+                    preset.model == selection
+                        || preset.id == selection
+                        || preset.display_name.eq_ignore_ascii_case(selection)
+                })
+                .collect::<Vec<_>>();
+            match exact_matches.as_slice() {
+                [preset] => preset.model.clone(),
+                [] => {
+                    return Ok((
+                        format!(
+                            "未找到模型：{selection}\n\n{}",
+                            Self::format_remote_im_model_list(&current_model, &models)
+                        ),
+                        None,
+                    ));
+                }
+                matches => {
+                    let choices = matches
+                        .iter()
+                        .map(|preset| format!("- {} ({})", preset.display_name, preset.model))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    return Ok((
+                        format!("模型名不唯一，请使用完整模型 ID：\n{choices}"),
+                        None,
+                    ));
+                }
+            }
+        };
+
+        if selected_model == current_model {
+            return Ok((format!("当前已经是模型：{selected_model}"), None));
+        }
+
+        self.set_model(&selected_model);
+        Ok((format!("已切换模型：{selected_model}"), Some(selected_model)))
+    }
+
+    fn format_remote_im_model_list(current_model: &str, models: &[ModelPreset]) -> String {
+        let mut lines = vec![format!("当前模型：{current_model}")];
+        if models.is_empty() {
+            lines.push("模型列表暂不可用。".to_string());
+            return lines.join("\n");
+        }
+
+        lines.push("可用模型：".to_string());
+        for (index, preset) in models.iter().enumerate() {
+            let current_marker = if preset.model == current_model {
+                "（当前）"
+            } else {
+                ""
+            };
+            lines.push(format!(
+                "{}. {} ({}){}",
+                index + 1,
+                preset.display_name,
+                preset.model,
+                current_marker
+            ));
+        }
+        lines.push("用法：/model <序号或模型ID>".to_string());
+        lines.join("\n")
     }
 
     pub(crate) fn set_collaboration_mask_from_user_action(&mut self, mask: CollaborationModeMask) {

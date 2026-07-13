@@ -228,13 +228,22 @@ pub(crate) enum AppEvent {
     OpenResumePicker,
 
     /// Switch Codex collaboration mode from the Multi-AI Code IM control channel.
+    /// `request_id` (when present) is echoed back via a `control_result` line so
+    /// the host reports the real outcome instead of assuming success.
     MultiAiCodeImSwitchMode {
         mode: ModeKind,
+        request_id: Option<String>,
     },
 
     /// Return the current Codex `/status` output to the Multi-AI Code IM control channel.
     MultiAiCodeImStatus {
         request_id: String,
+    },
+
+    /// List or switch Codex models from the Multi-AI Code IM control channel.
+    MultiAiCodeImModel {
+        request_id: String,
+        model: Option<String>,
     },
 
     /// Open the Claude Code migration picker inside the running TUI session.
