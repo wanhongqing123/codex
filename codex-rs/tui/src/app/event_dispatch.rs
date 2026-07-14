@@ -169,6 +169,30 @@ impl App {
                 }
                 tui.frame_requester().schedule_frame();
             }
+            AppEvent::MultiAiCodeImGoal { request_id, goal } => {
+                match self
+                    .handle_multi_ai_code_im_goal_control(app_server, goal)
+                    .await
+                {
+                    Ok(text) => {
+                        crate::multi_ai_code_im_bridge::send_control_result(
+                            &request_id,
+                            true,
+                            &text,
+                            None,
+                        );
+                    }
+                    Err(message) => {
+                        crate::multi_ai_code_im_bridge::send_control_result(
+                            &request_id,
+                            false,
+                            "",
+                            Some(&message),
+                        );
+                    }
+                }
+                tui.frame_requester().schedule_frame();
+            }
             AppEvent::OpenExternalAgentConfigMigration => {
                 match crate::external_agent_config_migration_flow::handle_external_agent_config_migration_prompt(
                     tui,

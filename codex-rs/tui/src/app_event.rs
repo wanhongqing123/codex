@@ -246,6 +246,12 @@ pub(crate) enum AppEvent {
         model: Option<String>,
     },
 
+    /// Read or manage the current thread goal from the Multi-AI Code IM control channel.
+    MultiAiCodeImGoal {
+        request_id: String,
+        goal: Option<String>,
+    },
+
     /// Open the Claude Code migration picker inside the running TUI session.
     OpenExternalAgentConfigMigration,
 

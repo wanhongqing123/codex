@@ -800,13 +800,11 @@ impl ChatWidget {
             } else {
                 ""
             };
-            lines.push(format!(
-                "{}. {} ({}){}",
-                index + 1,
-                preset.display_name,
-                preset.model,
-                current_marker
-            ));
+            lines.push(format!("{}. {}{}", index + 1, preset.display_name, current_marker));
+            lines.push(format!("   ID: {}", preset.model));
+            if preset.id != preset.model {
+                lines.push(format!("   别名: {}", preset.id));
+            }
         }
         lines.push("用法：/model <序号或模型ID>".to_string());
         lines.join("\n")

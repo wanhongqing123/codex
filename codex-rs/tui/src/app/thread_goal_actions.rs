@@ -21,6 +21,115 @@ const EPHEMERAL_THREAD_GOAL_ERROR_MESSAGE: &str = concat!(
 );
 
 impl App {
+    pub(super) async fn handle_multi_ai_code_im_goal_control(
+        &mut self,
+        app_server: &mut AppServerSession,
+        input: Option<String>,
+    ) -> Result<String, String> {
+        let Some(thread_id) = self.current_displayed_thread_id() else {
+            return Err(EPHEMERAL_THREAD_GOAL_ERROR_MESSAGE.to_string());
+        };
+        let input = input
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+
+        let Some(input) = input else {
+            let response = app_server
+                .thread_goal_get(thread_id)
+                .await
+                .map_err(|err| thread_goal_error_message("read", &err))?;
+            return Ok(match response.goal {
+                Some(goal) => format_remote_im_goal(&goal),
+                None => format!("{GOAL_USAGE}\n\nNo goal is currently set."),
+            });
+        };
+
+        match input {
+            "clear" => {
+                let response = app_server
+                    .thread_goal_clear(thread_id)
+                    .await
+                    .map_err(|err| thread_goal_error_message("clear", &err))?;
+                if response.cleared {
+                    self.chat_widget
+                        .add_info_message("Goal cleared".to_string(), /*hint*/ None);
+                    Ok("Goal cleared.".to_string())
+                } else {
+                    Ok("No goal is currently set.".to_string())
+                }
+            }
+            "pause" | "paused" => {
+                let response = app_server
+                    .thread_goal_set(
+                        thread_id,
+                        /*objective*/ None,
+                        Some(ThreadGoalStatus::Paused),
+                        /*token_budget*/ None,
+                    )
+                    .await
+                    .map_err(|err| thread_goal_error_message("update", &err))?;
+                self.chat_widget.add_info_message(
+                    format!("Goal {}", goal_status_label(response.goal.status)),
+                    Some(goal_usage_summary(&response.goal)),
+                );
+                Ok(format_remote_im_goal(&response.goal))
+            }
+            "resume" | "active" => {
+                let response = app_server
+                    .thread_goal_set(
+                        thread_id,
+                        /*objective*/ None,
+                        Some(ThreadGoalStatus::Active),
+                        /*token_budget*/ None,
+                    )
+                    .await
+                    .map_err(|err| thread_goal_error_message("update", &err))?;
+                self.chat_widget.add_info_message(
+                    format!("Goal {}", goal_status_label(response.goal.status)),
+                    Some(goal_usage_summary(&response.goal)),
+                );
+                Ok(format_remote_im_goal(&response.goal))
+            }
+            objective => {
+                let existing = app_server
+                    .thread_goal_get(thread_id)
+                    .await
+                    .map_err(|err| thread_goal_error_message("read", &err))?
+                    .goal;
+                if existing.as_ref().is_some_and(should_confirm_before_replacing_goal) {
+                    return Ok(format!(
+                        "{}\n\n已有未完成 Goal。为避免远程误覆盖，请先发送 /goal clear，再发送 /goal <新目标>。",
+                        existing
+                            .as_ref()
+                            .map(format_remote_im_goal)
+                            .unwrap_or_else(|| "No goal is currently set.".to_string())
+                    ));
+                }
+                if existing.is_some() {
+                    app_server
+                        .thread_goal_clear(thread_id)
+                        .await
+                        .map_err(|err| thread_goal_error_message("replace", &err))?;
+                }
+                let response = app_server
+                    .thread_goal_set(
+                        thread_id,
+                        Some(objective.to_string()),
+                        Some(ThreadGoalStatus::Active),
+                        /*token_budget*/ None,
+                    )
+                    .await
+                    .map_err(|err| thread_goal_error_message("set", &err))?;
+                self.chat_widget.add_info_message(
+                    format!("Goal {}", goal_status_label(response.goal.status)),
+                    Some(goal_usage_summary(&response.goal)),
+                );
+                Ok(format_remote_im_goal(&response.goal))
+            }
+        }
+    }
+
     pub(super) async fn open_thread_goal_menu(
         &mut self,
         app_server: &mut AppServerSession,
@@ -372,6 +481,14 @@ fn should_confirm_before_replacing_goal(goal: &ThreadGoal) -> bool {
         | ThreadGoalStatus::UsageLimited
         | ThreadGoalStatus::BudgetLimited => true,
     }
+}
+
+fn format_remote_im_goal(goal: &ThreadGoal) -> String {
+    format!(
+        "Goal {}\n{}",
+        goal_status_label(goal.status),
+        goal_usage_summary(goal)
+    )
 }
 
 #[cfg(test)]

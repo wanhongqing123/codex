@@ -56,6 +56,7 @@ struct ControlPayload {
     command: Option<String>,
     mode: Option<String>,
     model: Option<String>,
+    goal: Option<String>,
     #[serde(rename = "requestId")]
     request_id: Option<String>,
 }
@@ -125,6 +126,15 @@ pub(crate) fn start_control_listener(app_event_tx: AppEventSender) {
                         app_event_tx.send(AppEvent::MultiAiCodeImModel {
                             request_id,
                             model: payload.model,
+                        });
+                    }
+                    Some("goal") => {
+                        let Some(request_id) = payload.request_id else {
+                            continue;
+                        };
+                        app_event_tx.send(AppEvent::MultiAiCodeImGoal {
+                            request_id,
+                            goal: payload.goal,
                         });
                     }
                     _ => {}
