@@ -59,6 +59,8 @@ struct ControlPayload {
     reasoning: Option<String>,
     goal: Option<String>,
     task: Option<String>,
+    #[serde(rename = "replyId")]
+    reply_id: Option<String>,
     #[serde(rename = "requestId")]
     request_id: Option<String>,
 }
@@ -138,6 +140,7 @@ fn control_payload_to_app_event(payload: ControlPayload, token: &str) -> Option<
         "btw" => Some(AppEvent::MultiAiCodeImBtw {
             request_id: payload.request_id?,
             task: payload.task.unwrap_or_default(),
+            reply_id: payload.reply_id,
         }),
         "interrupt" => Some(AppEvent::MultiAiCodeImInterrupt {
             request_id: payload.request_id?,
@@ -388,6 +391,7 @@ mod tests {
             reasoning: None,
             goal: None,
             task: None,
+            reply_id: None,
             request_id: Some("req-1".to_string()),
         }
     }
@@ -410,5 +414,26 @@ mod tests {
                 _ => unreachable!(),
             }
         }
+    }
+
+    #[test]
+    fn btw_control_payload_preserves_reply_id() {
+        let mut payload = control_payload("btw");
+        payload.task = Some("检查日志".to_string());
+        payload.reply_id = Some("reply-btw-fixed".to_string());
+
+        let event = control_payload_to_app_event(payload, "token")
+            .expect("expected /btw control payload to map to app event");
+
+        assert!(matches!(
+            event,
+            AppEvent::MultiAiCodeImBtw {
+                request_id,
+                task,
+                reply_id
+            } if request_id == "req-1"
+                && task == "检查日志"
+                && reply_id.as_deref() == Some("reply-btw-fixed")
+        ));
     }
 }
