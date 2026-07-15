@@ -98,62 +98,58 @@ pub(crate) fn start_control_listener(app_event_tx: AppEventSender) {
                 let Ok(payload) = serde_json::from_str::<ControlPayload>(&line) else {
                     continue;
                 };
-                if payload.token.as_deref() != Some(config.token.as_str())
-                    || payload.kind.as_deref() != Some("control")
-                {
-                    continue;
-                }
-                match payload.command.as_deref() {
-                    Some("switch_mode") => {
-                        let mode = match payload.mode.as_deref() {
-                            Some("plan") => ModeKind::Plan,
-                            Some("build") => ModeKind::Default,
-                            _ => continue,
-                        };
-                        app_event_tx.send(AppEvent::MultiAiCodeImSwitchMode {
-                            mode,
-                            request_id: payload.request_id,
-                        });
-                    }
-                    Some("status") => {
-                        let Some(request_id) = payload.request_id else {
-                            continue;
-                        };
-                        app_event_tx.send(AppEvent::MultiAiCodeImStatus { request_id });
-                    }
-                    Some("model") => {
-                        let Some(request_id) = payload.request_id else {
-                            continue;
-                        };
-                        app_event_tx.send(AppEvent::MultiAiCodeImModel {
-                            request_id,
-                            model: payload.model,
-                            reasoning: payload.reasoning,
-                        });
-                    }
-                    Some("goal") => {
-                        let Some(request_id) = payload.request_id else {
-                            continue;
-                        };
-                        app_event_tx.send(AppEvent::MultiAiCodeImGoal {
-                            request_id,
-                            goal: payload.goal,
-                        });
-                    }
-                    Some("btw") => {
-                        let Some(request_id) = payload.request_id else {
-                            continue;
-                        };
-                        app_event_tx.send(AppEvent::MultiAiCodeImBtw {
-                            request_id,
-                            task: payload.task.unwrap_or_default(),
-                        });
-                    }
-                    _ => {}
+                if let Some(event) = control_payload_to_app_event(payload, &config.token) {
+                    app_event_tx.send(event);
                 }
             }
         }
     });
+}
+
+fn control_payload_to_app_event(payload: ControlPayload, token: &str) -> Option<AppEvent> {
+    if payload.token.as_deref() != Some(token) || payload.kind.as_deref() != Some("control") {
+        return None;
+    }
+
+    match payload.command.as_deref()? {
+        "switch_mode" => {
+            let mode = match payload.mode.as_deref()? {
+                "plan" => ModeKind::Plan,
+                "build" => ModeKind::Default,
+                _ => return None,
+            };
+            Some(AppEvent::MultiAiCodeImSwitchMode {
+                mode,
+                request_id: payload.request_id,
+            })
+        }
+        "status" => Some(AppEvent::MultiAiCodeImStatus {
+            request_id: payload.request_id?,
+        }),
+        "model" => Some(AppEvent::MultiAiCodeImModel {
+            request_id: payload.request_id?,
+            model: payload.model,
+            reasoning: payload.reasoning,
+        }),
+        "goal" => Some(AppEvent::MultiAiCodeImGoal {
+            request_id: payload.request_id?,
+            goal: payload.goal,
+        }),
+        "btw" => Some(AppEvent::MultiAiCodeImBtw {
+            request_id: payload.request_id?,
+            task: payload.task.unwrap_or_default(),
+        }),
+        "interrupt" => Some(AppEvent::MultiAiCodeImInterrupt {
+            request_id: payload.request_id?,
+        }),
+        "compact" => Some(AppEvent::MultiAiCodeImCompact {
+            request_id: payload.request_id?,
+        }),
+        "clear" => Some(AppEvent::MultiAiCodeImClear {
+            request_id: payload.request_id?,
+        }),
+        _ => None,
+    }
 }
 
 pub(crate) fn send_assistant_text(text: &str, message_id: Option<&str>) {
@@ -227,7 +223,10 @@ struct AckPayload {
 fn data_sender() -> Option<&'static mpsc::Sender<DataMsg>> {
     DATA_SENDER
         .get_or_init(|| {
-            let config = BRIDGE_CONFIG.get().and_then(|item| item.as_ref()).cloned()?;
+            let config = BRIDGE_CONFIG
+                .get()
+                .and_then(|item| item.as_ref())
+                .cloned()?;
             let (tx, rx) = mpsc::channel::<DataMsg>();
             let tx_for_manager = tx.clone();
             thread::spawn(move || run_data_manager(config, rx, tx_for_manager));
@@ -269,12 +268,17 @@ fn run_data_manager(config: BridgeConfig, rx: mpsc::Receiver<DataMsg>, tx: mpsc:
                 write_line(&config, &mut stream, &mut generation, &tx, &line);
             }
             Ok(DataMsg::Ack { message_id }) => {
-                if let Some(pos) = pending.iter().position(|item| item.message_id == message_id) {
+                if let Some(pos) = pending
+                    .iter()
+                    .position(|item| item.message_id == message_id)
+                {
                     pending.remove(pos);
                 }
             }
             Ok(DataMsg::PeerClosed { generation: closed }) => {
-                if closed == generation && let Some(old) = stream.take() {
+                if closed == generation
+                    && let Some(old) = stream.take()
+                {
                     let _ = old.shutdown(Shutdown::Both);
                 }
             }
@@ -286,8 +290,11 @@ fn run_data_manager(config: BridgeConfig, rx: mpsc::Receiver<DataMsg>, tx: mpsc:
                     if let Some(old) = stream.take() {
                         let _ = old.shutdown(Shutdown::Both);
                     }
-                    let resend: Vec<String> =
-                        pending.iter().take(MAX_RESEND).map(|item| item.line.clone()).collect();
+                    let resend: Vec<String> = pending
+                        .iter()
+                        .take(MAX_RESEND)
+                        .map(|item| item.line.clone())
+                        .collect();
                     let now = Instant::now();
                     for line in &resend {
                         write_line(&config, &mut stream, &mut generation, &tx, line);
@@ -365,4 +372,43 @@ fn parse_endpoint(endpoint: &str) -> Option<BridgeConfig> {
             (key == "token" && !value.is_empty()).then(|| value.into_owned())
         })?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn control_payload(command: &str) -> ControlPayload {
+        ControlPayload {
+            token: Some("token".to_string()),
+            kind: Some("control".to_string()),
+            command: Some(command.to_string()),
+            mode: None,
+            model: None,
+            reasoning: None,
+            goal: None,
+            task: None,
+            request_id: Some("req-1".to_string()),
+        }
+    }
+
+    #[test]
+    fn lifecycle_control_payloads_map_to_app_events() {
+        for command in ["interrupt", "compact", "clear"] {
+            let event = control_payload_to_app_event(control_payload(command), "token")
+                .expect("expected lifecycle command to map to an app event");
+            match command {
+                "interrupt" => assert!(
+                    matches!(event, AppEvent::MultiAiCodeImInterrupt { request_id } if request_id == "req-1")
+                ),
+                "compact" => assert!(
+                    matches!(event, AppEvent::MultiAiCodeImCompact { request_id } if request_id == "req-1")
+                ),
+                "clear" => assert!(
+                    matches!(event, AppEvent::MultiAiCodeImClear { request_id } if request_id == "req-1")
+                ),
+                _ => unreachable!(),
+            }
+        }
+    }
 }

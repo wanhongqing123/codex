@@ -114,7 +114,9 @@ impl App {
                 tui.frame_requester().schedule_frame();
             }
             AppEvent::MultiAiCodeImSwitchMode { mode, request_id } => {
-                let result = self.chat_widget.switch_collaboration_mode_from_remote_im(mode);
+                let result = self
+                    .chat_widget
+                    .switch_collaboration_mode_from_remote_im(mode);
                 // Report the real outcome so the host never claims a switch
                 // that the TUI actually refused (disabled modes, running turn...).
                 if let Some(request_id) = request_id.as_deref() {
@@ -201,6 +203,68 @@ impl App {
                     }
                 }
                 tui.frame_requester().schedule_frame();
+            }
+            AppEvent::MultiAiCodeImInterrupt { request_id } => {
+                match self.chat_widget.interrupt_from_remote_im() {
+                    Ok(()) => crate::multi_ai_code_im_bridge::send_control_result(
+                        &request_id,
+                        true,
+                        "已请求中断当前任务。",
+                        None,
+                    ),
+                    Err(message) => crate::multi_ai_code_im_bridge::send_control_result(
+                        &request_id,
+                        false,
+                        "",
+                        Some(&message),
+                    ),
+                }
+                tui.frame_requester().schedule_frame();
+            }
+            AppEvent::MultiAiCodeImCompact { request_id } => {
+                match self.chat_widget.compact_from_remote_im() {
+                    Ok(()) => crate::multi_ai_code_im_bridge::send_control_result(
+                        &request_id,
+                        true,
+                        "已请求压缩当前上下文。",
+                        None,
+                    ),
+                    Err(message) => crate::multi_ai_code_im_bridge::send_control_result(
+                        &request_id,
+                        false,
+                        "",
+                        Some(&message),
+                    ),
+                }
+                tui.frame_requester().schedule_frame();
+            }
+            AppEvent::MultiAiCodeImClear { request_id } => {
+                if self.chat_widget.is_task_running() {
+                    crate::multi_ai_code_im_bridge::send_control_result(
+                        &request_id,
+                        false,
+                        "",
+                        Some("当前任务运行中，请先 /interrupt 或等待结束后再 /clear。"),
+                    );
+                    tui.frame_requester().schedule_frame();
+                } else {
+                    self.clear_terminal_ui(tui, /*redraw_header*/ false)?;
+                    self.reset_app_ui_state_after_clear();
+                    self.start_fresh_session_with_summary_hint(
+                        tui,
+                        app_server,
+                        Some(ThreadStartSource::Clear),
+                        /*initial_user_message*/ None,
+                    )
+                    .await;
+                    crate::multi_ai_code_im_bridge::send_control_result(
+                        &request_id,
+                        true,
+                        "已清空上下文并开启新会话。",
+                        None,
+                    );
+                    tui.frame_requester().schedule_frame();
+                }
             }
             AppEvent::MultiAiCodeImGoal { request_id, goal } => {
                 match self

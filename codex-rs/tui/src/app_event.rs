@@ -259,6 +259,21 @@ pub(crate) enum AppEvent {
         task: String,
     },
 
+    /// Interrupt the active Codex turn from the Multi-AI Code IM control channel.
+    MultiAiCodeImInterrupt {
+        request_id: String,
+    },
+
+    /// Compact the active Codex thread context from the Multi-AI Code IM control channel.
+    MultiAiCodeImCompact {
+        request_id: String,
+    },
+
+    /// Clear the active Codex thread and start a fresh session from the Multi-AI Code IM control channel.
+    MultiAiCodeImClear {
+        request_id: String,
+    },
+
     /// Open the Claude Code migration picker inside the running TUI session.
     OpenExternalAgentConfigMigration,
 

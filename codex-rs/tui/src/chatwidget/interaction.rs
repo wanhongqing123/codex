@@ -250,6 +250,31 @@ impl ChatWidget {
         false
     }
 
+    pub(crate) fn is_task_running(&self) -> bool {
+        self.bottom_pane.is_task_running()
+    }
+
+    pub(crate) fn interrupt_from_remote_im(&mut self) -> Result<(), String> {
+        if !self.is_cancellable_work_active() {
+            return Err("当前没有正在运行的任务。".to_string());
+        }
+
+        self.app_event_tx.interrupt();
+        self.pause_active_goal_for_interrupt();
+        Ok(())
+    }
+
+    pub(crate) fn compact_from_remote_im(&mut self) -> Result<(), String> {
+        if self.bottom_pane.is_task_running() {
+            return Err("当前任务运行中，请先 /interrupt 或等待结束后再 /compact。".to_string());
+        }
+
+        self.clear_token_usage();
+        self.bottom_pane.set_task_running(/*running*/ true);
+        self.app_event_tx.compact();
+        Ok(())
+    }
+
     /// Copy the last agent response (raw markdown) to the system clipboard.
     pub(crate) fn copy_last_agent_markdown(&mut self) {
         self.copy_last_agent_markdown_with(crate::clipboard_copy::copy_to_clipboard);
