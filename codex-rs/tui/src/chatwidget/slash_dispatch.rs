@@ -110,12 +110,14 @@ impl ChatWidget {
     fn request_side_conversation(
         &mut self,
         parent_thread_id: ThreadId,
+        auto_return_on_turn_complete: bool,
         user_message: Option<UserMessage>,
     ) {
         self.set_side_conversation_context_label(Some(SIDE_STARTING_CONTEXT_LABEL.to_string()));
         self.request_redraw();
         self.app_event_tx.send(AppEvent::StartSide {
             parent_thread_id,
+            auto_return_on_turn_complete,
             user_message,
         });
     }
@@ -129,7 +131,11 @@ impl ChatWidget {
             return;
         };
 
-        self.request_side_conversation(parent_thread_id, /*user_message*/ None);
+        self.request_side_conversation(
+            parent_thread_id,
+            /*auto_return_on_turn_complete*/ false,
+            /*user_message*/ None,
+        );
     }
 
     pub(crate) fn submit_btw_from_remote_im(
@@ -155,7 +161,11 @@ impl ChatWidget {
             None => task.to_string(),
         };
 
-        self.request_side_conversation(parent_thread_id, Some(UserMessage::from(task)));
+        self.request_side_conversation(
+            parent_thread_id,
+            /*auto_return_on_turn_complete*/ true,
+            Some(UserMessage::from(task)),
+        );
         Ok(())
     }
 
@@ -897,7 +907,11 @@ impl ChatWidget {
                     mention_bindings,
                     source,
                 );
-                self.request_side_conversation(parent_thread_id, Some(user_message));
+                self.request_side_conversation(
+                    parent_thread_id,
+                    /*auto_return_on_turn_complete*/ false,
+                    Some(user_message),
+                );
             }
             SlashCommand::Review if !trimmed.is_empty() => {
                 self.submit_op(AppCommand::review(ReviewTarget::Custom {

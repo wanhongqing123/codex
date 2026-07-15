@@ -2145,10 +2145,17 @@ impl App {
             }
             AppEvent::StartSide {
                 parent_thread_id,
+                auto_return_on_turn_complete,
                 user_message,
             } => {
                 return self
-                    .handle_start_side(tui, app_server, parent_thread_id, user_message)
+                    .handle_start_side(
+                        tui,
+                        app_server,
+                        parent_thread_id,
+                        auto_return_on_turn_complete,
+                        user_message,
+                    )
                     .await;
             }
             AppEvent::OpenSkillsList => {

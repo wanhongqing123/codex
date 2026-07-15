@@ -1485,6 +1485,13 @@ impl App {
         ) && self.pending_shutdown_exit_thread_id
             == self.active_thread_id;
 
+        // Whether this event marks the active thread's turn finishing. Used below
+        // to auto-return from an IM-initiated `/btw` side conversation.
+        let turn_completed = matches!(
+            &event,
+            ThreadBufferedEvent::Notification(ServerNotification::TurnCompleted(_))
+        );
+
         // Processing order matters:
         //
         // 1. handle unexpected non-primary shutdown failover first;
@@ -1528,6 +1535,9 @@ impl App {
             self.pending_shutdown_exit_thread_id = None;
         }
         self.handle_thread_event_now(event);
+        if turn_completed {
+            self.maybe_auto_return_from_im_side(tui, app_server).await?;
+        }
         if self.backtrack_render_pending {
             tui.frame_requester().schedule_frame();
         }

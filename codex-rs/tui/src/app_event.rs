@@ -156,6 +156,9 @@ pub(crate) enum AppEvent {
     /// Fork the current thread into a transient side conversation.
     StartSide {
         parent_thread_id: ThreadId,
+        /// When true, auto-return to the parent thread once this side thread's
+        /// turn completes (IM-initiated `/btw`, which has no interactive Ctrl+C).
+        auto_return_on_turn_complete: bool,
         user_message: Option<UserMessage>,
     },
 

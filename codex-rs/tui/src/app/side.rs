@@ -207,6 +207,10 @@ pub(super) struct SideThreadState {
     pub(super) parent_thread_id: ThreadId,
     /// Parent-thread condition that changed while this side thread is visible.
     pub(super) parent_status: Option<SideParentStatus>,
+    /// When true, automatically return to the parent thread as soon as this
+    /// side thread's agent turn completes. Set for IM-initiated `/btw` side
+    /// conversations, which have no interactive Ctrl+C to return.
+    pub(super) auto_return_on_turn_complete: bool,
 }
 
 impl SideThreadState {
@@ -214,6 +218,7 @@ impl SideThreadState {
         Self {
             parent_thread_id,
             parent_status: None,
+            auto_return_on_turn_complete: false,
         }
     }
 }
@@ -347,6 +352,38 @@ impl App {
         } else {
             false
         }
+    }
+
+    /// Auto-return to the parent thread once an IM-initiated side conversation's
+    /// turn goes idle. IM `/btw` has no interactive Ctrl+C, so without this every
+    /// later injected IM message would stay trapped in the side thread.
+    pub(super) async fn maybe_auto_return_from_im_side(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+    ) -> Result<()> {
+        let Some(side_thread_id) = self.current_displayed_thread_id() else {
+            return Ok(());
+        };
+        let Some(parent_thread_id) = self
+            .side_threads
+            .get(&side_thread_id)
+            .filter(|state| state.auto_return_on_turn_complete)
+            .map(|state| state.parent_thread_id)
+        else {
+            return Ok(());
+        };
+        // Only return once the side thread has no in-flight turn, so a steered
+        // follow-up turn is not cut off.
+        if self
+            .active_turn_id_for_thread(side_thread_id)
+            .await
+            .is_some()
+        {
+            return Ok(());
+        }
+        self.select_agent_thread_and_discard_side(tui, app_server, parent_thread_id)
+            .await
     }
 
     pub(super) fn side_thread_to_discard_after_switch(
@@ -556,6 +593,7 @@ impl App {
         tui: &mut tui::Tui,
         app_server: &mut AppServerSession,
         parent_thread_id: ThreadId,
+        auto_return_on_turn_complete: bool,
         mut user_message: Option<crate::chatwidget::UserMessage>,
     ) -> Result<AppRunControl> {
         if let Some(message) = self.side_start_block_message() {
@@ -582,8 +620,9 @@ impl App {
                     let mut store = channel.store.lock().await;
                     Self::install_side_thread_snapshot(&mut store, forked.session, forked.turns);
                 }
-                self.side_threads
-                    .insert(child_thread_id, SideThreadState::new(parent_thread_id));
+                let mut side_state = SideThreadState::new(parent_thread_id);
+                side_state.auto_return_on_turn_complete = auto_return_on_turn_complete;
+                self.side_threads.insert(child_thread_id, side_state);
                 if let Err(err) = app_server
                     .thread_inject_items(child_thread_id, vec![Self::side_boundary_prompt_item()])
                     .await

@@ -262,6 +262,7 @@ async fn slash_side_without_args_starts_empty_side_conversation() {
         rx.try_recv(),
         Ok(AppEvent::StartSide {
             parent_thread_id: emitted_parent_thread_id,
+            auto_return_on_turn_complete: false,
             user_message: None,
         }) if emitted_parent_thread_id == parent_thread_id
     );
@@ -287,6 +288,7 @@ async fn slash_btw_without_args_starts_empty_side_conversation() {
         rx.try_recv(),
         Ok(AppEvent::StartSide {
             parent_thread_id: emitted_parent_thread_id,
+            auto_return_on_turn_complete: false,
             user_message: None,
         }) if emitted_parent_thread_id == parent_thread_id
     );
@@ -318,6 +320,7 @@ async fn slash_side_requests_forked_side_question_while_task_running() {
         rx.try_recv(),
         Ok(AppEvent::StartSide {
             parent_thread_id: emitted_parent_thread_id,
+            auto_return_on_turn_complete: false,
             user_message: Some(user_message),
         }) if emitted_parent_thread_id == parent_thread_id
             && user_message
@@ -364,6 +367,7 @@ async fn slash_btw_requests_forked_side_question_while_task_running() {
         rx.try_recv(),
         Ok(AppEvent::StartSide {
             parent_thread_id: emitted_parent_thread_id,
+            auto_return_on_turn_complete: false,
             user_message: Some(user_message),
         }) if emitted_parent_thread_id == parent_thread_id
             && user_message
@@ -396,6 +400,7 @@ async fn remote_im_btw_wraps_task_with_reply_markers() {
     match rx.try_recv() {
         Ok(AppEvent::StartSide {
             parent_thread_id: emitted_parent_thread_id,
+            auto_return_on_turn_complete: true,
             user_message: Some(user_message),
         }) => {
             assert_eq!(emitted_parent_thread_id, parent_thread_id);
