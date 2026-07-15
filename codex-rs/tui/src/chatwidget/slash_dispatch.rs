@@ -126,6 +126,24 @@ impl ChatWidget {
         self.request_side_conversation(parent_thread_id, /*user_message*/ None);
     }
 
+    pub(crate) fn submit_btw_from_remote_im(&mut self, task: String) -> Result<(), String> {
+        let task = task.trim();
+        if task.is_empty() {
+            return Err("用法：/btw <任务>".to_string());
+        }
+
+        if !self.ensure_side_command_allowed_outside_review(SlashCommand::Btw) {
+            return Err("'/btw' is unavailable while code review is running.".to_string());
+        }
+
+        let Some(parent_thread_id) = self.thread_id else {
+            return Err("'/btw' is unavailable before the session starts.".to_string());
+        };
+
+        self.request_side_conversation(parent_thread_id, Some(UserMessage::from(task)));
+        Ok(())
+    }
+
     fn emit_raw_output_mode_changed(&self, enabled: bool) {
         self.app_event_tx
             .send(AppEvent::RawOutputModeChanged { enabled });
