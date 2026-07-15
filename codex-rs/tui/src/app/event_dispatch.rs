@@ -183,8 +183,12 @@ impl App {
                 }
                 tui.frame_requester().schedule_frame();
             }
-            AppEvent::MultiAiCodeImBtw { request_id, task } => {
-                match self.chat_widget.submit_btw_from_remote_im(task) {
+            AppEvent::MultiAiCodeImBtw {
+                request_id,
+                task,
+                reply_id,
+            } => {
+                match self.chat_widget.submit_btw_from_remote_im(task, reply_id) {
                     Ok(()) => {
                         crate::multi_ai_code_im_bridge::send_control_result(
                             &request_id,

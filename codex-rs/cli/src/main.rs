@@ -2461,6 +2461,7 @@ fn merge_interactive_cli_flags(interactive: &mut TuiCli, subcommand_cli: TuiCli)
         approval_policy,
         web_search,
         prompt,
+        multi_ai_code_im_ipc,
         config_overrides,
         ..
     } = subcommand_cli;
@@ -2479,6 +2480,9 @@ fn merge_interactive_cli_flags(interactive: &mut TuiCli, subcommand_cli: TuiCli)
     if let Some(prompt) = prompt {
         // Normalize CRLF/CR to LF so CLI-provided text can't leak `\r` into TUI state.
         interactive.prompt = Some(prompt.replace("\r\n", "\n").replace('\r', "\n"));
+    }
+    if let Some(endpoint) = multi_ai_code_im_ipc {
+        interactive.multi_ai_code_im_ipc = Some(endpoint);
     }
 
     interactive
@@ -3392,6 +3396,26 @@ mod tests {
     }
 
     #[test]
+    fn resume_merges_multi_ai_code_im_ipc_flag() {
+        let interactive = finalize_resume_from_args(
+            [
+                "codex",
+                "resume",
+                "--last",
+                "--multi-ai-code-im-ipc",
+                "tcp://127.0.0.1:1234?token=test",
+            ]
+            .as_ref(),
+        );
+
+        assert_eq!(
+            interactive.multi_ai_code_im_ipc.as_deref(),
+            Some("tcp://127.0.0.1:1234?token=test")
+        );
+        assert!(interactive.resume_last);
+    }
+
+    #[test]
     fn fork_picker_logic_none_and_not_last() {
         let interactive = finalize_fork_from_args(["codex", "fork"].as_ref());
         assert!(interactive.fork_picker);
@@ -3457,6 +3481,26 @@ mod tests {
         let interactive = finalize_fork_from_args(["codex", "fork", "--all"].as_ref());
         assert!(interactive.fork_picker);
         assert!(interactive.fork_show_all);
+    }
+
+    #[test]
+    fn fork_merges_multi_ai_code_im_ipc_flag() {
+        let interactive = finalize_fork_from_args(
+            [
+                "codex",
+                "fork",
+                "--last",
+                "--multi-ai-code-im-ipc",
+                "tcp://127.0.0.1:1234?token=test",
+            ]
+            .as_ref(),
+        );
+
+        assert_eq!(
+            interactive.multi_ai_code_im_ipc.as_deref(),
+            Some("tcp://127.0.0.1:1234?token=test")
+        );
+        assert!(interactive.fork_last);
     }
 
     #[test]

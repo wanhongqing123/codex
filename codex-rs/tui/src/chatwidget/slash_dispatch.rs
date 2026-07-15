@@ -38,6 +38,12 @@ const GOAL_USAGE_HINT: &str = "Example: /goal improve benchmark coverage";
 const RAW_USAGE: &str = "Usage: /raw [on|off]";
 const USAGE_CHATGPT_LOGIN_REQUIRED: &str = "Sign in with ChatGPT to use /usage.";
 
+fn build_remote_im_btw_task(task: &str, reply_id: &str) -> String {
+    format!(
+        "{task}\n\n[IM_REPLY] Put final Markdown for IM between these exact markers, each on its own line in your reply:\nOpening marker: <remote-im-reply id=\"{reply_id}\">\nClosing marker: </remote-im-reply id=\"{reply_id}\">\nText outside markers is ignored."
+    )
+}
+
 impl ChatWidget {
     /// Dispatch a bare slash command and record its staged local-history entry.
     ///
@@ -126,7 +132,11 @@ impl ChatWidget {
         self.request_side_conversation(parent_thread_id, /*user_message*/ None);
     }
 
-    pub(crate) fn submit_btw_from_remote_im(&mut self, task: String) -> Result<(), String> {
+    pub(crate) fn submit_btw_from_remote_im(
+        &mut self,
+        task: String,
+        reply_id: Option<String>,
+    ) -> Result<(), String> {
         let task = task.trim();
         if task.is_empty() {
             return Err("用法：/btw <任务>".to_string());
@@ -138,6 +148,11 @@ impl ChatWidget {
 
         let Some(parent_thread_id) = self.thread_id else {
             return Err("'/btw' is unavailable before the session starts.".to_string());
+        };
+
+        let task = match reply_id.filter(|id| !id.trim().is_empty()) {
+            Some(reply_id) => build_remote_im_btw_task(task, reply_id.trim()),
+            None => task.to_string(),
         };
 
         self.request_side_conversation(parent_thread_id, Some(UserMessage::from(task)));

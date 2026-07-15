@@ -382,6 +382,44 @@ async fn slash_btw_requests_forked_side_question_while_task_running() {
 }
 
 #[tokio::test]
+async fn remote_im_btw_wraps_task_with_reply_markers() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let parent_thread_id = ThreadId::new();
+    chat.thread_id = Some(parent_thread_id);
+
+    chat.submit_btw_from_remote_im(
+        "检查最近一次失败日志".to_string(),
+        Some("reply-btw-fixed".to_string()),
+    )
+    .expect("remote IM /btw should start a side task");
+
+    match rx.try_recv() {
+        Ok(AppEvent::StartSide {
+            parent_thread_id: emitted_parent_thread_id,
+            user_message: Some(user_message),
+        }) => {
+            assert_eq!(emitted_parent_thread_id, parent_thread_id);
+            assert!(user_message.text.contains("检查最近一次失败日志"));
+            assert!(
+                user_message
+                    .text
+                    .contains("<remote-im-reply id=\"reply-btw-fixed\">")
+            );
+            assert!(
+                user_message
+                    .text
+                    .contains("</remote-im-reply id=\"reply-btw-fixed\">")
+            );
+        }
+        other => panic!("expected StartSide with wrapped remote IM /btw task, got {other:?}"),
+    }
+    assert!(
+        op_rx.try_recv().is_err(),
+        "expected no op on the parent thread"
+    );
+}
+
+#[tokio::test]
 async fn side_context_label_preserves_status_line_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.show_welcome_banner = false;

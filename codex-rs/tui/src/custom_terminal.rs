@@ -422,11 +422,17 @@ where
         self.flush()?;
 
         match cursor_position {
-            None => self.hide_cursor()?,
+            None => {
+                if !self.hidden_cursor {
+                    self.hide_cursor()?;
+                }
+            }
             Some(position) => {
                 self.set_cursor_style(cursor_style)?;
-                self.show_cursor()?;
                 self.set_cursor_position(position)?;
+                if self.hidden_cursor {
+                    self.show_cursor()?;
+                }
             }
         }
 
@@ -785,6 +791,7 @@ mod tests {
         output: Vec<u8>,
         size: Size,
         cursor: Position,
+        events: Vec<String>,
     }
 
     impl CaptureBackend {
@@ -793,6 +800,7 @@ mod tests {
                 output: Vec::new(),
                 size: Size { width, height },
                 cursor: Position { x: 0, y: 0 },
+                events: Vec::new(),
             }
         }
 
@@ -821,10 +829,12 @@ mod tests {
         }
 
         fn hide_cursor(&mut self) -> io::Result<()> {
+            self.events.push("hide".to_string());
             Ok(())
         }
 
         fn show_cursor(&mut self) -> io::Result<()> {
+            self.events.push("show".to_string());
             Ok(())
         }
 
@@ -834,6 +844,8 @@ mod tests {
 
         fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
             self.cursor = position.into();
+            self.events
+                .push(format!("move:{},{}", self.cursor.x, self.cursor.y));
             Ok(())
         }
 
@@ -950,6 +962,45 @@ mod tests {
             actual.contains(&expected),
             "expected terminal output to contain cursor style {expected:?}, got {actual:?}"
         );
+    }
+
+    #[test]
+    fn terminal_draw_does_not_repeat_hide_cursor_when_already_hidden() {
+        let mut terminal =
+            Terminal::with_options(CaptureBackend::new(/*width*/ 2, /*height*/ 1))
+                .expect("terminal");
+        terminal.set_viewport_area(Rect::new(0, 0, 2, 1));
+
+        terminal
+            .try_draw(|_frame| io::Result::Ok(()))
+            .expect("first draw");
+        terminal
+            .try_draw(|_frame| io::Result::Ok(()))
+            .expect("second draw");
+
+        assert_eq!(terminal.backend().events, vec!["hide"]);
+    }
+
+    #[test]
+    fn terminal_draw_moves_cursor_before_showing_hidden_cursor() {
+        let mut terminal =
+            Terminal::with_options(CaptureBackend::new(/*width*/ 4, /*height*/ 2))
+                .expect("terminal");
+        terminal.set_viewport_area(Rect::new(0, 0, 4, 2));
+
+        terminal
+            .try_draw(|_frame| io::Result::Ok(()))
+            .expect("hide cursor");
+        terminal.backend_mut().events.clear();
+
+        terminal
+            .try_draw(|frame| {
+                frame.set_cursor_position((3, 1));
+                io::Result::Ok(())
+            })
+            .expect("show cursor");
+
+        assert_eq!(terminal.backend().events, vec!["move:3,1", "show"]);
     }
 
     #[test]

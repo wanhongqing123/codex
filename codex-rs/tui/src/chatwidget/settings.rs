@@ -821,7 +821,11 @@ impl ChatWidget {
         }
 
         self.set_model(&selected_model);
-        Ok((format!("已切换模型：{selected_model}"), Some(selected_model), None))
+        Ok((
+            format!("已切换模型：{selected_model}"),
+            Some(selected_model),
+            None,
+        ))
     }
 
     fn format_remote_im_model_list(current_model: &str, models: &[ModelPreset]) -> String {
@@ -840,7 +844,12 @@ impl ChatWidget {
             } else {
                 ""
             };
-            lines.push(format!("{}. {}{}", index + 1, preset.display_name, current_marker));
+            lines.push(format!(
+                "{}. {}{}",
+                index + 1,
+                preset.display_name,
+                current_marker
+            ));
             lines.push(format!("   ID: {}", preset.model));
             if preset.id != preset.model {
                 lines.push(format!("   别名: {}", preset.id));

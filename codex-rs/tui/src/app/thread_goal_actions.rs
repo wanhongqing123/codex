@@ -97,7 +97,10 @@ impl App {
                     .await
                     .map_err(|err| thread_goal_error_message("read", &err))?
                     .goal;
-                if existing.as_ref().is_some_and(should_confirm_before_replacing_goal) {
+                if existing
+                    .as_ref()
+                    .is_some_and(should_confirm_before_replacing_goal)
+                {
                     return Ok(format!(
                         "{}\n\n已有未完成 Goal。为避免远程误覆盖，请先发送 /goal clear，再发送 /goal <新目标>。",
                         existing
