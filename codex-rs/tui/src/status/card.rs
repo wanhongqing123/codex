@@ -559,30 +559,31 @@ impl StatusHistoryCell {
     }
 
     fn remote_im_status_text(&self) -> String {
-        let mut lines = vec![format!("OpenAI Codex (v{CODEX_CLI_VERSION})")];
+        let mut lines = vec![format!("## OpenAI Codex (v{CODEX_CLI_VERSION})")];
 
         if self.show_chatgpt_usage_link {
+            lines.push(String::new());
             lines.push(format!(
-                "Usage: {CHATGPT_USAGE_URL} for up-to-date information on rate limits and credits"
+                "- **Usage**: <{CHATGPT_USAGE_URL}> for up-to-date information on rate limits and credits"
             ));
         }
 
         if let Some(remote_connection) = self.remote_connection.as_ref() {
             lines.push(format!(
-                "Remote: {} ({})",
+                "- **Remote**: {} ({})",
                 remote_connection.address, remote_connection.version
             ));
         }
 
-        lines.push(format!("Model: {}", self.model_value()));
+        lines.push(format!("- **Model**: {}", self.model_value()));
         if let Some(model_provider) = self.model_provider.as_ref() {
-            lines.push(format!("Model provider: {model_provider}"));
+            lines.push(format!("- **Model provider**: {model_provider}"));
         }
         lines.push(format!(
-            "Directory: {}",
+            "- **Directory**: {}",
             format_directory_display(&self.directory, None)
         ));
-        lines.push(format!("Permissions: {}", self.permissions));
+        lines.push(format!("- **Permissions**: {}", self.permissions));
 
         #[expect(clippy::expect_used)]
         let agents_summary = self
@@ -590,31 +591,31 @@ impl StatusHistoryCell {
             .read()
             .expect("status history agents summary state poisoned")
             .clone();
-        lines.push(format!("Agents.md: {agents_summary}"));
+        lines.push(format!("- **Agents.md**: {agents_summary}"));
 
         if let Some(account_value) = self.account_value() {
-            lines.push(format!("Account: {account_value}"));
+            lines.push(format!("- **Account**: {account_value}"));
         }
         if let Some(thread_name) = self.thread_name.as_deref().filter(|name| !name.is_empty()) {
-            lines.push(format!("Thread name: {thread_name}"));
+            lines.push(format!("- **Thread name**: {thread_name}"));
         }
         if let Some(collab_mode) = self.collaboration_mode.as_ref() {
-            lines.push(format!("Collaboration mode: {collab_mode}"));
+            lines.push(format!("- **Collaboration mode**: {collab_mode}"));
         }
         if let Some(session_id) = self.session_id.as_ref() {
-            lines.push(format!("Session: {session_id}"));
+            lines.push(format!("- **Session**: {session_id}"));
         }
         if self.session_id.is_some()
             && let Some(forked_from) = self.forked_from.as_ref()
         {
-            lines.push(format!("Forked from: {forked_from}"));
+            lines.push(format!("- **Forked from**: {forked_from}"));
         }
 
         if !matches!(self.account, Some(StatusAccountDisplay::ChatGpt { .. })) {
-            lines.push(format!("Token usage: {}", self.token_usage_text()));
+            lines.push(format!("- **Token usage**: {}", self.token_usage_text()));
         }
         if let Some(context_window) = self.context_window_text() {
-            lines.push(format!("Context window: {context_window}"));
+            lines.push(format!("- **Context window**: {context_window}"));
         }
 
         #[expect(clippy::expect_used)]
@@ -622,7 +623,12 @@ impl StatusHistoryCell {
             .rate_limit_state
             .read()
             .expect("status history rate-limit state poisoned");
-        lines.extend(self.remote_im_rate_limit_lines(&rate_limit_state));
+        let rate_limit_lines = self.remote_im_rate_limit_lines(&rate_limit_state);
+        if !rate_limit_lines.is_empty() {
+            lines.push(String::new());
+            lines.push("### Limits".to_string());
+            lines.extend(rate_limit_lines.into_iter().map(|line| format!("- {line}")));
+        }
 
         lines.join("\n")
     }

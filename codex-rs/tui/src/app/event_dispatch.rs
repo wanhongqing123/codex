@@ -139,12 +139,16 @@ impl App {
                 crate::multi_ai_code_im_bridge::send_control_result(&request_id, true, &text, None);
                 tui.frame_requester().schedule_frame();
             }
-            AppEvent::MultiAiCodeImModel { request_id, model } => {
+            AppEvent::MultiAiCodeImModel {
+                request_id,
+                model,
+                reasoning,
+            } => {
                 match self
                     .chat_widget
-                    .model_control_output_from_remote_im(model.as_deref())
+                    .model_control_output_from_remote_im(model.as_deref(), reasoning.as_deref())
                 {
-                    Ok((text, switched_model)) => {
+                    Ok((text, switched_model, switched_reasoning)) => {
                         crate::multi_ai_code_im_bridge::send_control_result(
                             &request_id,
                             true,
@@ -157,6 +161,35 @@ impl App {
                             self.sync_active_thread_service_tier_to_cached_session()
                                 .await;
                         }
+                        if let Some(switched_reasoning) = switched_reasoning {
+                            self.on_update_reasoning_effort(Some(switched_reasoning.clone()));
+                            self.sync_active_thread_reasoning_setting(
+                                app_server,
+                                Some(switched_reasoning),
+                            )
+                            .await;
+                        }
+                    }
+                    Err(message) => {
+                        crate::multi_ai_code_im_bridge::send_control_result(
+                            &request_id,
+                            false,
+                            "",
+                            Some(&message),
+                        );
+                    }
+                }
+                tui.frame_requester().schedule_frame();
+            }
+            AppEvent::MultiAiCodeImBtw { request_id, task } => {
+                match self.chat_widget.submit_btw_from_remote_im(task) {
+                    Ok(()) => {
+                        crate::multi_ai_code_im_bridge::send_control_result(
+                            &request_id,
+                            true,
+                            "已提交 /btw 子任务，完成后会通过 IM 回传。",
+                            None,
+                        );
                     }
                     Err(message) => {
                         crate::multi_ai_code_im_bridge::send_control_result(

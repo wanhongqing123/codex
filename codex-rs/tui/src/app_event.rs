@@ -244,12 +244,19 @@ pub(crate) enum AppEvent {
     MultiAiCodeImModel {
         request_id: String,
         model: Option<String>,
+        reasoning: Option<String>,
     },
 
     /// Read or manage the current thread goal from the Multi-AI Code IM control channel.
     MultiAiCodeImGoal {
         request_id: String,
         goal: Option<String>,
+    },
+
+    /// Start a Codex side task from the Multi-AI Code IM control channel.
+    MultiAiCodeImBtw {
+        request_id: String,
+        task: String,
     },
 
     /// Open the Claude Code migration picker inside the running TUI session.
