@@ -56,7 +56,9 @@ struct ControlPayload {
     command: Option<String>,
     mode: Option<String>,
     model: Option<String>,
+    reasoning: Option<String>,
     goal: Option<String>,
+    task: Option<String>,
     #[serde(rename = "requestId")]
     request_id: Option<String>,
 }
@@ -126,6 +128,7 @@ pub(crate) fn start_control_listener(app_event_tx: AppEventSender) {
                         app_event_tx.send(AppEvent::MultiAiCodeImModel {
                             request_id,
                             model: payload.model,
+                            reasoning: payload.reasoning,
                         });
                     }
                     Some("goal") => {
@@ -135,6 +138,15 @@ pub(crate) fn start_control_listener(app_event_tx: AppEventSender) {
                         app_event_tx.send(AppEvent::MultiAiCodeImGoal {
                             request_id,
                             goal: payload.goal,
+                        });
+                    }
+                    Some("btw") => {
+                        let Some(request_id) = payload.request_id else {
+                            continue;
+                        };
+                        app_event_tx.send(AppEvent::MultiAiCodeImBtw {
+                            request_id,
+                            task: payload.task.unwrap_or_default(),
                         });
                     }
                     _ => {}

@@ -77,26 +77,26 @@ async fn status_command_renders_immediately_without_rate_limit_refresh() {
 }
 
 #[tokio::test]
-async fn remote_im_status_uses_plain_pre_render_text() {
+async fn remote_im_status_uses_markdown_pre_render_text() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
     let text = chat.add_status_output_from_remote_im();
 
     assert!(
-        text.contains("OpenAI Codex"),
-        "expected remote IM status text to include the status title, got: {text}"
+        text.contains("## OpenAI Codex"),
+        "expected remote IM status text to include a markdown status title, got: {text}"
     );
     assert!(
-        text.contains("Model:"),
-        "expected remote IM status text to include model details, got: {text}"
+        text.contains("- **Model**:"),
+        "expected remote IM status text to include markdown model details, got: {text}"
     );
     assert!(
-        text.contains("Directory:"),
-        "expected remote IM status text to include directory details, got: {text}"
+        text.contains("- **Directory**:"),
+        "expected remote IM status text to include markdown directory details, got: {text}"
     );
     assert!(
-        text.contains("Permissions:"),
-        "expected remote IM status text to include permissions details, got: {text}"
+        text.contains("- **Permissions**:"),
+        "expected remote IM status text to include markdown permissions details, got: {text}"
     );
     for rendered_artifact in ["╭", "╰", "│", "─", "█", "░"] {
         assert!(
