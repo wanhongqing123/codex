@@ -59,10 +59,25 @@ struct ControlPayload {
     reasoning: Option<String>,
     goal: Option<String>,
     task: Option<String>,
+    // 运行时主题：宿主终端的背景/前景色（6 位十六进制，可带 #）。
+    bg: Option<String>,
+    fg: Option<String>,
     #[serde(rename = "replyId")]
     reply_id: Option<String>,
     #[serde(rename = "requestId")]
     request_id: Option<String>,
+}
+
+/// Parse an `RRGGBB` (optionally `#`-prefixed) hex string into an 8-bit RGB tuple.
+fn parse_hex_rgb(value: &str) -> Option<(u8, u8, u8)> {
+    let hex = value.trim().trim_start_matches('#');
+    if hex.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some((r, g, b))
 }
 
 pub(crate) fn start_control_listener(app_event_tx: AppEventSender) {
@@ -151,6 +166,16 @@ fn control_payload_to_app_event(payload: ControlPayload, token: &str) -> Option<
         "clear" => Some(AppEvent::MultiAiCodeImClear {
             request_id: payload.request_id?,
         }),
+        "theme" => {
+            // bg 必填；fg 缺省时由 bg 的明暗推导（见 event_dispatch 处理）。
+            let bg = parse_hex_rgb(payload.bg.as_deref()?)?;
+            let fg = payload.fg.as_deref().and_then(parse_hex_rgb);
+            Some(AppEvent::MultiAiCodeImTheme {
+                request_id: payload.request_id,
+                bg,
+                fg,
+            })
+        }
         _ => None,
     }
 }
