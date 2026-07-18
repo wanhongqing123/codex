@@ -53,44 +53,86 @@ impl RemoteImReplyDisplayFilter {
     }
 }
 
-fn is_remote_im_open_marker(line: &str) -> bool {
-    let line = line.trim();
-    line == "<remote-im-reply>"
-        || (line.starts_with("<remote-im-reply id=\"") && line.ends_with("\">"))
+const REMOTE_IM_OPEN_PREFIX: &str = "<remote-im-reply";
+const REMOTE_IM_CLOSE_PREFIX: &str = "</remote-im-reply";
+const GENERATED_REPLY_ID_PREFIX: &str = "rim-";
+const GENERATED_REPLY_ID_HEX_LEN: usize = 16;
+
+fn generated_reply_id_end(marker: &str, value_start: usize) -> Option<usize> {
+    let value_len = GENERATED_REPLY_ID_PREFIX.len() + GENERATED_REPLY_ID_HEX_LEN;
+    let value_end = value_start.checked_add(value_len)?;
+    let value = marker.get(value_start..value_end)?;
+    let hex = value.strip_prefix(GENERATED_REPLY_ID_PREFIX)?;
+    hex.bytes()
+        .all(|byte| byte.is_ascii_hexdigit())
+        .then_some(value_end)
 }
 
-fn is_remote_im_close_marker(line: &str) -> bool {
-    let line = line.trim();
-    line == "</remote-im-reply>"
-        || (line.starts_with("</remote-im-reply id=\"") && line.ends_with("\">"))
+fn remote_im_open_marker_body_start(marker: &str) -> Option<usize> {
+    let suffix = marker.strip_prefix(REMOTE_IM_OPEN_PREFIX)?;
+    if suffix.starts_with('>') {
+        return Some(REMOTE_IM_OPEN_PREFIX.len() + 1);
+    }
+
+    const ID_PREFIX: &str = " id=\"";
+    let with_id = suffix.strip_prefix(ID_PREFIX)?;
+    if let Some(close) = with_id.find("\">") {
+        return Some(REMOTE_IM_OPEN_PREFIX.len() + ID_PREFIX.len() + close + 2);
+    }
+
+    // Remote IM reply IDs are generated as rim- + 16 hex characters. Knowing
+    // their exact length lets the TUI recover when a model omits the final
+    // quote/angle bracket and starts the reply body immediately after the ID.
+    let value_start = REMOTE_IM_OPEN_PREFIX.len() + ID_PREFIX.len();
+    let mut body_start = generated_reply_id_end(marker, value_start)?;
+    if marker
+        .get(body_start..)
+        .is_some_and(|tail| tail.starts_with('"'))
+    {
+        body_start += 1;
+    }
+    if marker
+        .get(body_start..)
+        .is_some_and(|tail| tail.starts_with('>'))
+    {
+        body_start += 1;
+    }
+    Some(body_start)
+}
+
+fn remote_im_reply_body_end(body: &str) -> usize {
+    if let Some(index) = body.find(REMOTE_IM_CLOSE_PREFIX) {
+        return index;
+    }
+
+    let max_partial = body.len().min(REMOTE_IM_CLOSE_PREFIX.len());
+    for len in (1..=max_partial).rev() {
+        if body
+            .as_bytes()
+            .ends_with(&REMOTE_IM_CLOSE_PREFIX.as_bytes()[..len])
+        {
+            return body.len() - len;
+        }
+    }
+    body.len()
 }
 
 pub(crate) fn visible_remote_im_reply_text(text: &str) -> String {
-    let mut found_open = false;
-    let mut inside = false;
-    let mut visible = String::new();
-
-    for segment in text.split_inclusive('\n') {
-        let line = segment.strip_suffix('\n').unwrap_or(segment);
-        if is_remote_im_open_marker(line) {
-            found_open = true;
-            inside = true;
-            continue;
-        }
-        if inside && is_remote_im_close_marker(line) {
-            break;
-        }
-        if inside {
-            visible.push_str(segment);
-        }
-    }
-
-    if found_open {
-        return visible;
+    if let Some(open_index) = text.find(REMOTE_IM_OPEN_PREFIX) {
+        let marker = &text[open_index..];
+        let Some(body_start) = remote_im_open_marker_body_start(marker) else {
+            return String::new();
+        };
+        let body = &marker[body_start..];
+        let body = body
+            .strip_prefix("\r\n")
+            .or_else(|| body.strip_prefix('\n'))
+            .unwrap_or(body);
+        return body[..remote_im_reply_body_end(body)].to_string();
     }
 
     let candidate = text.trim_start();
-    if !candidate.contains('\n') && "<remote-im-reply".starts_with(candidate) {
+    if !candidate.contains('\n') && REMOTE_IM_OPEN_PREFIX.starts_with(candidate) {
         return String::new();
     }
     text.to_string()
@@ -567,16 +609,21 @@ mod tests {
     fn remote_im_reply_filter_hides_markers_and_streams_visible_markdown() {
         let mut filter = RemoteImReplyDisplayFilter::default();
         assert_eq!(filter.push("<remote-im-re"), "");
-        assert_eq!(filter.push("ply id=\"rim-1\">\n# 回复\n"), "# 回复\n");
-        assert_eq!(
-            filter.push("内容\n</remote-im-reply id=\"rim-1\">"),
-            "内容\n"
-        );
+        assert_eq!(filter.push("ply id=\"rim-1\"># 回复\n"), "# 回复\n");
+        assert_eq!(filter.push("内容\n</remote-im-re"), "内容\n");
+        assert_eq!(filter.push("ply id=\"rim-1\">"), "");
         assert_eq!(
             visible_remote_im_reply_text(
                 "<remote-im-reply id=\"rim-1\">\n# 回复\n内容\n</remote-im-reply id=\"rim-1\">"
             ),
             "# 回复\n内容\n"
         );
+        assert_eq!(
+            visible_remote_im_reply_text(
+                "<remote-im-reply id=\"rim-0123456789abcdef你好，有什么需要我帮忙的？\n</remote-im-reply id=\"rim-0123456789abcdef"
+            ),
+            "你好，有什么需要我帮忙的？\n"
+        );
+        assert_eq!(visible_remote_im_reply_text("普通本地回复"), "普通本地回复");
     }
 }
