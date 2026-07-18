@@ -20,11 +20,24 @@ impl ChatWidget {
             text: display_text,
             text_elements: Vec::new(),
         });
+        let suppress_committed_echo = !self.turn_lifecycle.agent_turn_running;
+        let committed_echo = user_message_display_for_history(
+            UserMessage::from(text.clone()),
+            &UserMessageHistoryRecord::UserMessageText,
+        );
         let (accepted, _) = self.submit_user_message_with_history_and_shell_escape_policy(
             UserMessage::from(text),
             history_record,
             ShellEscapePolicy::Disallow,
         );
+        if accepted && suppress_committed_echo {
+            const MAX_PENDING_REMOTE_IM_ECHOES: usize = 32;
+            if self.remote_im_pending_user_message_echoes.len() >= MAX_PENDING_REMOTE_IM_ECHOES {
+                self.remote_im_pending_user_message_echoes.pop_front();
+            }
+            self.remote_im_pending_user_message_echoes
+                .push_back(committed_echo);
+        }
         accepted
             .then_some(())
             .ok_or_else(|| "Codex rejected the IM message".to_string())

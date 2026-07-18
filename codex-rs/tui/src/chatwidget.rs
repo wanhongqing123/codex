@@ -33,6 +33,7 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -572,6 +573,7 @@ pub(crate) struct ChatWidget {
     // Stream lifecycle controller
     stream_controller: Option<StreamController>,
     remote_im_reply_display: crate::multi_ai_code_im_bridge::RemoteImReplyDisplayFilter,
+    remote_im_pending_user_message_echoes: VecDeque<UserMessageDisplay>,
     // Stream lifecycle controller for proposed plan output.
     plan_stream_controller: Option<PlanStreamController>,
     pending_stream_consolidations: usize,
@@ -1268,6 +1270,15 @@ impl ChatWidget {
                     pending_pastes: Vec::new(),
                 });
             self.on_user_message_display(display);
+            return;
+        }
+
+        if let Some(index) = self
+            .remote_im_pending_user_message_echoes
+            .iter()
+            .position(|pending| pending == &display)
+        {
+            self.remote_im_pending_user_message_echoes.remove(index);
             return;
         }
 

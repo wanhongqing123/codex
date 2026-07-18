@@ -39,6 +39,67 @@ async fn remote_im_submission_keeps_model_prompt_out_of_tui_preview() {
 }
 
 #[tokio::test]
+async fn remote_im_submission_does_not_render_committed_model_prompt_echo() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let rollout_file = NamedTempFile::new().unwrap();
+    chat.handle_thread_session(crate::session_state::ThreadSessionState {
+        thread_id: ThreadId::new(),
+        forked_from_id: None,
+        fork_parent_title: None,
+        thread_name: None,
+        model: "test-model".to_string(),
+        model_provider_id: "test-provider".to_string(),
+        service_tier: None,
+        approval_policy: AskForApproval::Never,
+        approvals_reviewer: ApprovalsReviewer::User,
+        permission_profile: PermissionProfile::read_only(),
+        active_permission_profile: None,
+        cwd: test_path_buf("/home/user/project").abs(),
+        runtime_workspace_roots: Vec::new(),
+        instruction_source_paths: Vec::new(),
+        reasoning_effort: Some(ReasoningEffortConfig::default()),
+        collaboration_mode: None,
+        personality: None,
+        message_history: None,
+        network_proxy: None,
+        rollout_path: Some(rollout_file.path().to_path_buf()),
+    });
+    drain_insert_history(&mut rx);
+
+    let display_text = "[来自远程 IM：phone]\n你好";
+    let model_text = concat!(
+        "[来自远程 IM：phone]\n你好\n\n",
+        "[IM_REPLY] internal protocol\n",
+        "Opening marker: <remote-im-reply id=\"rim-0123456789abcdef\">"
+    );
+    assert_eq!(
+        chat.submit_user_message_from_remote_im(model_text.to_string(), display_text.to_string()),
+        Ok(())
+    );
+
+    let submitted_items = match next_submit_op(&mut op_rx) {
+        Op::UserTurn { items, .. } => items,
+        other => panic!("expected Op::UserTurn, got {other:?}"),
+    };
+    assert!(
+        submitted_items
+            .iter()
+            .any(|item| matches!(item, UserInput::Text { text, .. } if text == model_text))
+    );
+    complete_user_message(&mut chat, "remote-user-1", model_text);
+
+    let mut rendered_user_messages = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let AppEvent::InsertHistoryCell(cell) = event
+            && let Some(cell) = cell.as_any().downcast_ref::<UserHistoryCell>()
+        {
+            rendered_user_messages.push(cell.message.clone());
+        }
+    }
+    assert_eq!(rendered_user_messages, vec![display_text.to_string()]);
+}
+
+#[tokio::test]
 async fn submission_preserves_text_elements_and_local_images() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 

@@ -145,6 +145,7 @@ impl ChatWidget {
             adaptive_chunking: AdaptiveChunkingPolicy::default(),
             stream_controller: None,
             remote_im_reply_display: Default::default(),
+            remote_im_pending_user_message_echoes: VecDeque::new(),
             plan_stream_controller: None,
             pending_stream_consolidations: 0,
             clipboard_lease: None,
