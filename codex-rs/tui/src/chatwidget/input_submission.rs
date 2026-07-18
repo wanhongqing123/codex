@@ -3,6 +3,33 @@
 use super::*;
 
 impl ChatWidget {
+    pub(crate) fn submit_user_message_from_remote_im(
+        &mut self,
+        text: String,
+        display_text: String,
+    ) -> Result<(), String> {
+        if text.trim().is_empty() {
+            return Err("IM message is empty".to_string());
+        }
+        let display_text = if display_text.trim().is_empty() {
+            text.clone()
+        } else {
+            display_text
+        };
+        let history_record = UserMessageHistoryRecord::Override(UserMessageHistoryOverride {
+            text: display_text,
+            text_elements: Vec::new(),
+        });
+        let (accepted, _) = self.submit_user_message_with_history_and_shell_escape_policy(
+            UserMessage::from(text),
+            history_record,
+            ShellEscapePolicy::Disallow,
+        );
+        accepted
+            .then_some(())
+            .ok_or_else(|| "Codex rejected the IM message".to_string())
+    }
+
     pub(super) fn user_message_from_submission(
         &mut self,
         text: String,
