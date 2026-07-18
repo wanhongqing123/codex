@@ -10,6 +10,35 @@ use pretty_assertions::assert_eq;
 use std::collections::VecDeque;
 
 #[tokio::test]
+async fn remote_im_submission_keeps_model_prompt_out_of_tui_preview() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let model_text = "[来自远程 IM：phone]\n你好\n\n[IM_REPLY] internal protocol";
+    let display_text = "[来自远程 IM：phone]\n你好";
+
+    assert_eq!(
+        chat.submit_user_message_from_remote_im(model_text.to_string(), display_text.to_string()),
+        Ok(())
+    );
+    assert!(op_rx.try_recv().is_err());
+
+    let queued = chat
+        .input_queue
+        .queued_user_messages
+        .front()
+        .expect("remote IM message should queue until the session is configured");
+    let history = chat
+        .input_queue
+        .queued_user_message_history_records
+        .front()
+        .expect("remote IM display override should be retained");
+    assert_eq!(queued.user_message.text, model_text);
+    assert_eq!(
+        user_message_preview_text(&queued.user_message, Some(history)),
+        display_text
+    );
+}
+
+#[tokio::test]
 async fn submission_preserves_text_elements_and_local_images() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 

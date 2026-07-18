@@ -263,6 +263,13 @@ pub(crate) enum AppEvent {
         reply_id: Option<String>,
     },
 
+    /// Submit a normal user message from the Multi-AI Code IM control channel.
+    MultiAiCodeImSubmitUserMessage {
+        request_id: String,
+        text: String,
+        display_text: String,
+    },
+
     /// Interrupt the active Codex turn from the Multi-AI Code IM control channel.
     MultiAiCodeImInterrupt {
         request_id: String,

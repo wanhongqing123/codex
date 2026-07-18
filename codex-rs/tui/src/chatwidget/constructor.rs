@@ -144,6 +144,7 @@ impl ChatWidget {
             add_credits_nudge_email_in_flight: None,
             adaptive_chunking: AdaptiveChunkingPolicy::default(),
             stream_controller: None,
+            remote_im_reply_display: Default::default(),
             plan_stream_controller: None,
             pending_stream_consolidations: 0,
             clipboard_lease: None,

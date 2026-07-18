@@ -114,7 +114,10 @@ impl ChatWidget {
     }
 
     pub(super) fn on_agent_message_delta(&mut self, delta: String) {
-        self.handle_streaming_delta(delta);
+        let visible = self.remote_im_reply_display.push(&delta);
+        if !visible.is_empty() {
+            self.handle_streaming_delta(visible);
+        }
     }
 
     pub(super) fn on_plan_delta(&mut self, delta: String) {
@@ -285,6 +288,7 @@ impl ChatWidget {
         self.finalize_completed_assistant_message(
             (!parsed.visible_markdown.is_empty()).then_some(parsed.visible_markdown.as_str()),
         );
+        self.remote_im_reply_display.reset();
         if matches!(item.phase, Some(MessagePhase::FinalAnswer) | None)
             && !parsed.visible_markdown.is_empty()
         {

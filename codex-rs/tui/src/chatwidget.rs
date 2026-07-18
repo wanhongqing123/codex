@@ -430,7 +430,6 @@ pub(crate) use self::user_messages::ThreadInputState;
 pub(crate) use self::user_messages::ThreadInputStateRestoreMode;
 pub(crate) use self::user_messages::UserMessage;
 use self::user_messages::UserMessageDisplay;
-#[cfg(test)]
 use self::user_messages::UserMessageHistoryOverride;
 use self::user_messages::UserMessageHistoryRecord;
 use self::user_messages::app_server_text_elements;
@@ -572,6 +571,7 @@ pub(crate) struct ChatWidget {
     adaptive_chunking: AdaptiveChunkingPolicy,
     // Stream lifecycle controller
     stream_controller: Option<StreamController>,
+    remote_im_reply_display: crate::multi_ai_code_im_bridge::RemoteImReplyDisplayFilter,
     // Stream lifecycle controller for proposed plan output.
     plan_stream_controller: Option<PlanStreamController>,
     pending_stream_consolidations: usize,

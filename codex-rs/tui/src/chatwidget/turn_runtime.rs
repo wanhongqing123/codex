@@ -329,6 +329,7 @@ impl ChatWidget {
         self.unified_exec_wait_streak = None;
         self.adaptive_chunking.reset();
         self.stream_controller = None;
+        self.remote_im_reply_display.reset();
         self.plan_stream_controller = None;
         self.request_pending_usage_output_insertion_after_stream_shutdown();
         self.status_state.pending_status_indicator_restore = false;

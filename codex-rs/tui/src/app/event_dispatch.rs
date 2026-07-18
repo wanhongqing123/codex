@@ -208,6 +208,30 @@ impl App {
                 }
                 tui.frame_requester().schedule_frame();
             }
+            AppEvent::MultiAiCodeImSubmitUserMessage {
+                request_id,
+                text,
+                display_text,
+            } => {
+                match self
+                    .chat_widget
+                    .submit_user_message_from_remote_im(text, display_text)
+                {
+                    Ok(()) => crate::multi_ai_code_im_bridge::send_control_result(
+                        &request_id,
+                        true,
+                        "queued",
+                        None,
+                    ),
+                    Err(message) => crate::multi_ai_code_im_bridge::send_control_result(
+                        &request_id,
+                        false,
+                        "",
+                        Some(&message),
+                    ),
+                }
+                tui.frame_requester().schedule_frame();
+            }
             AppEvent::MultiAiCodeImInterrupt { request_id } => {
                 match self.chat_widget.interrupt_from_remote_im() {
                     Ok(()) => crate::multi_ai_code_im_bridge::send_control_result(
@@ -270,11 +294,7 @@ impl App {
                     tui.frame_requester().schedule_frame();
                 }
             }
-            AppEvent::MultiAiCodeImTheme {
-                request_id,
-                bg,
-                fg,
-            } => {
+            AppEvent::MultiAiCodeImTheme { request_id, bg, fg } => {
                 // 运行时更新终端默认前景/背景色（明暗判定读的就是这个），再请求重绘，
                 // 使 codex TUI 跟随宿主主题切换、无需重启会话。fg 缺省时按 bg 明暗推导。
                 let fg = fg.unwrap_or_else(|| {

@@ -28,6 +28,74 @@ struct BridgeConfig {
     token: String,
 }
 
+#[derive(Default)]
+pub(crate) struct RemoteImReplyDisplayFilter {
+    source: String,
+    visible: String,
+}
+
+impl RemoteImReplyDisplayFilter {
+    pub(crate) fn push(&mut self, delta: &str) -> String {
+        self.source.push_str(delta);
+        let next = visible_remote_im_reply_text(&self.source);
+        if !next.starts_with(&self.visible) {
+            self.visible = next;
+            return String::new();
+        }
+        let added = next[self.visible.len()..].to_string();
+        self.visible = next;
+        added
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.source.clear();
+        self.visible.clear();
+    }
+}
+
+fn is_remote_im_open_marker(line: &str) -> bool {
+    let line = line.trim();
+    line == "<remote-im-reply>"
+        || (line.starts_with("<remote-im-reply id=\"") && line.ends_with("\">"))
+}
+
+fn is_remote_im_close_marker(line: &str) -> bool {
+    let line = line.trim();
+    line == "</remote-im-reply>"
+        || (line.starts_with("</remote-im-reply id=\"") && line.ends_with("\">"))
+}
+
+pub(crate) fn visible_remote_im_reply_text(text: &str) -> String {
+    let mut found_open = false;
+    let mut inside = false;
+    let mut visible = String::new();
+
+    for segment in text.split_inclusive('\n') {
+        let line = segment.strip_suffix('\n').unwrap_or(segment);
+        if is_remote_im_open_marker(line) {
+            found_open = true;
+            inside = true;
+            continue;
+        }
+        if inside && is_remote_im_close_marker(line) {
+            break;
+        }
+        if inside {
+            visible.push_str(segment);
+        }
+    }
+
+    if found_open {
+        return visible;
+    }
+
+    let candidate = text.trim_start();
+    if !candidate.contains('\n') && "<remote-im-reply".starts_with(candidate) {
+        return String::new();
+    }
+    text.to_string()
+}
+
 static BRIDGE_CONFIG: OnceLock<Option<BridgeConfig>> = OnceLock::new();
 
 // Lazily-started data-channel manager. All codex -> host output (assistant_text /
@@ -59,6 +127,9 @@ struct ControlPayload {
     reasoning: Option<String>,
     goal: Option<String>,
     task: Option<String>,
+    text: Option<String>,
+    #[serde(rename = "displayText")]
+    display_text: Option<String>,
     // 运行时主题：宿主终端的背景/前景色（6 位十六进制，可带 #）。
     bg: Option<String>,
     fg: Option<String>,
@@ -156,6 +227,11 @@ fn control_payload_to_app_event(payload: ControlPayload, token: &str) -> Option<
             request_id: payload.request_id?,
             task: payload.task.unwrap_or_default(),
             reply_id: payload.reply_id,
+        }),
+        "submit_user_message" => Some(AppEvent::MultiAiCodeImSubmitUserMessage {
+            request_id: payload.request_id?,
+            text: payload.text.unwrap_or_default(),
+            display_text: payload.display_text.unwrap_or_default(),
         }),
         "interrupt" => Some(AppEvent::MultiAiCodeImInterrupt {
             request_id: payload.request_id?,
@@ -416,6 +492,10 @@ mod tests {
             reasoning: None,
             goal: None,
             task: None,
+            text: None,
+            display_text: None,
+            bg: None,
+            fg: None,
             reply_id: None,
             request_id: Some("req-1".to_string()),
         }
@@ -460,5 +540,43 @@ mod tests {
                 && task == "检查日志"
                 && reply_id.as_deref() == Some("reply-btw-fixed")
         ));
+    }
+
+    #[test]
+    fn submit_user_message_payload_preserves_model_and_display_text() {
+        let mut payload = control_payload("submit_user_message");
+        payload.text = Some("wrapped model prompt".to_string());
+        payload.display_text = Some("[来自远程 IM：phone]\n你好".to_string());
+
+        let event = control_payload_to_app_event(payload, "token")
+            .expect("expected ordinary IM message to map to app event");
+
+        assert!(matches!(
+            event,
+            AppEvent::MultiAiCodeImSubmitUserMessage {
+                request_id,
+                text,
+                display_text
+            } if request_id == "req-1"
+                && text == "wrapped model prompt"
+                && display_text == "[来自远程 IM：phone]\n你好"
+        ));
+    }
+
+    #[test]
+    fn remote_im_reply_filter_hides_markers_and_streams_visible_markdown() {
+        let mut filter = RemoteImReplyDisplayFilter::default();
+        assert_eq!(filter.push("<remote-im-re"), "");
+        assert_eq!(filter.push("ply id=\"rim-1\">\n# 回复\n"), "# 回复\n");
+        assert_eq!(
+            filter.push("内容\n</remote-im-reply id=\"rim-1\">"),
+            "内容\n"
+        );
+        assert_eq!(
+            visible_remote_im_reply_text(
+                "<remote-im-reply id=\"rim-1\">\n# 回复\n内容\n</remote-im-reply id=\"rim-1\">"
+            ),
+            "# 回复\n内容\n"
+        );
     }
 }

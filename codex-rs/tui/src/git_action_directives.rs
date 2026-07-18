@@ -53,6 +53,7 @@ impl ParsedAssistantMarkdown {
 }
 
 pub(crate) fn parse_assistant_markdown(markdown: &str, cwd: &Path) -> ParsedAssistantMarkdown {
+    let markdown = crate::multi_ai_code_im_bridge::visible_remote_im_reply_text(markdown);
     let mut git_actions = Vec::new();
     let mut seen = HashSet::new();
     let mut visible_lines = Vec::new();
