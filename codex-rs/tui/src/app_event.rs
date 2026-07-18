@@ -278,6 +278,15 @@ pub(crate) enum AppEvent {
         request_id: String,
     },
 
+    /// Update the terminal default fg/bg (light/dark) at runtime from the host,
+    /// so the TUI repaints in the new theme without a session restart.
+    /// `fg` is derived from `bg` when absent. `request_id` optional (fire-and-forget).
+    MultiAiCodeImTheme {
+        request_id: Option<String>,
+        bg: (u8, u8, u8),
+        fg: Option<(u8, u8, u8)>,
+    },
+
     /// Open the Claude Code migration picker inside the running TUI session.
     OpenExternalAgentConfigMigration,
 

@@ -270,6 +270,28 @@ impl App {
                     tui.frame_requester().schedule_frame();
                 }
             }
+            AppEvent::MultiAiCodeImTheme {
+                request_id,
+                bg,
+                fg,
+            } => {
+                // 运行时更新终端默认前景/背景色（明暗判定读的就是这个），再请求重绘，
+                // 使 codex TUI 跟随宿主主题切换、无需重启会话。fg 缺省时按 bg 明暗推导。
+                let fg = fg.unwrap_or_else(|| {
+                    if crate::color::is_light(bg) {
+                        (0, 0, 0)
+                    } else {
+                        (255, 255, 255)
+                    }
+                });
+                crate::terminal_palette::set_default_colors_from_startup_probe(Some(
+                    crate::terminal_probe::DefaultColors { fg, bg },
+                ));
+                tui.frame_requester().schedule_frame();
+                if let Some(request_id) = request_id.as_deref() {
+                    crate::multi_ai_code_im_bridge::send_control_result(request_id, true, "", None);
+                }
+            }
             AppEvent::MultiAiCodeImGoal { request_id, goal } => {
                 match self
                     .handle_multi_ai_code_im_goal_control(app_server, goal)
