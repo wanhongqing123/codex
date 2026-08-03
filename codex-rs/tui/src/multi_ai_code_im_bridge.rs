@@ -141,7 +141,7 @@ pub(crate) fn visible_remote_im_reply_text(text: &str) -> String {
 static BRIDGE_CONFIG: OnceLock<Option<BridgeConfig>> = OnceLock::new();
 
 // Lazily-started data-channel manager. All codex -> host output (assistant_text /
-// control_result) is funneled through this so a single owner thread controls the
+// turn_error / control_result) is funneled through this so a single owner thread controls the
 // TCP stream, tracks per-message acks and reconnects + resends on a stale socket.
 static DATA_SENDER: OnceLock<Option<mpsc::Sender<DataMsg>>> = OnceLock::new();
 
@@ -299,6 +299,15 @@ fn control_payload_to_app_event(payload: ControlPayload, token: &str) -> Option<
 }
 
 pub(crate) fn send_assistant_text(text: &str, message_id: Option<&str>) {
+    send_reliable_text("assistant_text", text, message_id);
+}
+
+pub(crate) fn send_turn_error(text: &str, turn_id: Option<&str>) {
+    let message_id = turn_id.map(|id| format!("{id}:error"));
+    send_reliable_text("turn_error", text, message_id.as_deref());
+}
+
+fn send_reliable_text(kind: &'static str, text: &str, message_id: Option<&str>) {
     if text.is_empty() {
         return;
     }
@@ -309,7 +318,8 @@ pub(crate) fn send_assistant_text(text: &str, message_id: Option<&str>) {
         .filter(|id| !id.is_empty())
         .map(str::to_string)
         .unwrap_or_else(next_message_id);
-    let _ = sender.send(DataMsg::AssistantText {
+    let _ = sender.send(DataMsg::ReliableText {
+        kind,
         text: text.to_string(),
         message_id,
     });
@@ -345,14 +355,24 @@ fn next_message_id() -> String {
 }
 
 enum DataMsg {
-    AssistantText { text: String, message_id: String },
-    ControlResult { line: String },
+    ReliableText {
+        kind: &'static str,
+        text: String,
+        message_id: String,
+    },
+    ControlResult {
+        line: String,
+    },
     // Funneled in from the reader sub-thread:
-    Ack { message_id: String },
-    PeerClosed { generation: u64 },
+    Ack {
+        message_id: String,
+    },
+    PeerClosed {
+        generation: u64,
+    },
 }
 
-struct PendingAssistantText {
+struct PendingReliableText {
     message_id: String,
     line: String,
     sent_at: Instant,
@@ -388,14 +408,18 @@ fn data_sender() -> Option<&'static mpsc::Sender<DataMsg>> {
 fn run_data_manager(config: BridgeConfig, rx: mpsc::Receiver<DataMsg>, tx: mpsc::Sender<DataMsg>) {
     let mut stream: Option<TcpStream> = None;
     let mut generation: u64 = 0;
-    let mut pending: VecDeque<PendingAssistantText> = VecDeque::new();
+    let mut pending: VecDeque<PendingReliableText> = VecDeque::new();
 
     loop {
         match rx.recv_timeout(WATCHDOG_TICK) {
-            Ok(DataMsg::AssistantText { text, message_id }) => {
+            Ok(DataMsg::ReliableText {
+                kind,
+                text,
+                message_id,
+            }) => {
                 let payload = json!({
                     "token": config.token,
-                    "kind": "assistant_text",
+                    "kind": kind,
                     "text": text,
                     "messageId": message_id.clone(),
                 });
@@ -403,7 +427,7 @@ fn run_data_manager(config: BridgeConfig, rx: mpsc::Receiver<DataMsg>, tx: mpsc:
                 if pending.len() >= MAX_PENDING {
                     pending.pop_front();
                 }
-                pending.push_back(PendingAssistantText {
+                pending.push_back(PendingReliableText {
                     message_id,
                     line: line.clone(),
                     sent_at: Instant::now(),
@@ -465,7 +489,7 @@ fn write_line(
     if stream.is_none() {
         let Ok(new_stream) = TcpStream::connect((config.host.as_str(), config.port)) else {
             // Stay disconnected; the watchdog / next send will retry, and pending
-            // assistant_text is preserved for resend.
+            // reliable events are preserved for resend.
             return;
         };
         *generation += 1;
