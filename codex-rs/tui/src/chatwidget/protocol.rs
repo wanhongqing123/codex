@@ -130,6 +130,12 @@ impl ChatWidget {
                         );
                     }
                 } else {
+                    if !from_replay {
+                        crate::multi_ai_code_im_bridge::send_turn_error(
+                            &notification.error.message,
+                            Some(notification.turn_id.as_str()),
+                        );
+                    }
                     self.last_non_retry_error = Some((
                         notification.turn_id.clone(),
                         notification.error.message.clone(),
@@ -263,12 +269,19 @@ impl ChatWidget {
                 self.on_interrupted_turn(reason);
             }
             TurnStatus::Failed => {
+                let turn_id = notification.turn.id.clone();
                 if let Some(error) = notification.turn.error {
                     if self.last_non_retry_error.as_ref()
                         == Some(&(notification.turn.id.clone(), error.message.clone()))
                     {
                         self.last_non_retry_error = None;
                     } else {
+                        if replay_kind.is_none() {
+                            crate::multi_ai_code_im_bridge::send_turn_error(
+                                &error.message,
+                                Some(turn_id.as_str()),
+                            );
+                        }
                         self.handle_non_retry_error(error.message, error.codex_error_info);
                     }
                 } else {
