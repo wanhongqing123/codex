@@ -332,6 +332,7 @@ impl App {
                         app_server,
                         Some(ThreadStartSource::Clear),
                         /*initial_user_message*/ None,
+                        /*new_thread_name*/ None,
                     )
                     .await;
                     crate::multi_ai_code_im_bridge::send_control_result(

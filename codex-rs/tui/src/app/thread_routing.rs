@@ -1648,7 +1648,8 @@ impl App {
         // to auto-return from an IM-initiated `/btw` side conversation.
         let turn_completed = matches!(
             &event,
-            ThreadBufferedEvent::Notification(ServerNotification::TurnCompleted(_))
+            ThreadBufferedEvent::Notification(notification)
+                if matches!(notification.as_ref(), ServerNotification::TurnCompleted(_))
         );
 
         // Processing order matters:

@@ -2164,6 +2164,7 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
         &mut tui,
         &mut app_server,
         parent_thread_id,
+        /*auto_return_on_turn_complete*/ false,
         /*user_message*/ None,
     ))
     .await?;
