@@ -58,6 +58,19 @@ const REMOTE_IM_CLOSE_PREFIX: &str = "</remote-im-reply";
 const GENERATED_REPLY_ID_PREFIX: &str = "rim-";
 const GENERATED_REPLY_ID_HEX_LEN: usize = 16;
 
+pub(crate) fn remote_im_reply_id(text: &str) -> Option<String> {
+    const PREFIX: &str = "Opening marker: <remote-im-reply id=\"";
+    text.lines().find_map(|line| {
+        let reply_id = line.trim().strip_prefix(PREFIX)?.strip_suffix("\">")?;
+        (!reply_id.is_empty()
+            && reply_id.len() <= 80
+            && reply_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')))
+        .then(|| reply_id.to_string())
+    })
+}
+
 fn generated_reply_id_end(marker: &str, value_start: usize) -> Option<usize> {
     let value_len = GENERATED_REPLY_ID_PREFIX.len() + GENERATED_REPLY_ID_HEX_LEN;
     let value_end = value_start.checked_add(value_len)?;
@@ -299,15 +312,30 @@ fn control_payload_to_app_event(payload: ControlPayload, token: &str) -> Option<
 }
 
 pub(crate) fn send_assistant_text(text: &str, message_id: Option<&str>) {
-    send_reliable_text("assistant_text", text, message_id);
+    send_reliable_text("assistant_text", text, message_id, None);
 }
 
-pub(crate) fn send_turn_error(text: &str, turn_id: Option<&str>) {
+pub(crate) fn send_assistant_final(text: &str, message_id: Option<&str>, reply_id: &str) {
+    let message_id = message_id.map(|id| format!("{id}:final"));
+    send_reliable_text(
+        "assistant_final",
+        text,
+        message_id.as_deref(),
+        Some(reply_id),
+    );
+}
+
+pub(crate) fn send_turn_error(text: &str, turn_id: Option<&str>, reply_id: &str) {
     let message_id = turn_id.map(|id| format!("{id}:error"));
-    send_reliable_text("turn_error", text, message_id.as_deref());
+    send_reliable_text("turn_error", text, message_id.as_deref(), Some(reply_id));
 }
 
-fn send_reliable_text(kind: &'static str, text: &str, message_id: Option<&str>) {
+fn send_reliable_text(
+    kind: &'static str,
+    text: &str,
+    message_id: Option<&str>,
+    reply_id: Option<&str>,
+) {
     if text.is_empty() {
         return;
     }
@@ -322,6 +350,7 @@ fn send_reliable_text(kind: &'static str, text: &str, message_id: Option<&str>) 
         kind,
         text: text.to_string(),
         message_id,
+        reply_id: reply_id.map(str::to_string),
     });
 }
 
@@ -359,6 +388,7 @@ enum DataMsg {
         kind: &'static str,
         text: String,
         message_id: String,
+        reply_id: Option<String>,
     },
     ControlResult {
         line: String,
@@ -416,13 +446,17 @@ fn run_data_manager(config: BridgeConfig, rx: mpsc::Receiver<DataMsg>, tx: mpsc:
                 kind,
                 text,
                 message_id,
+                reply_id,
             }) => {
-                let payload = json!({
+                let mut payload = json!({
                     "token": config.token,
                     "kind": kind,
                     "text": text,
                     "messageId": message_id.clone(),
                 });
+                if let Some(reply_id) = reply_id {
+                    payload["replyId"] = reply_id.into();
+                }
                 let line = format!("{payload}\n");
                 if pending.len() >= MAX_PENDING {
                     pending.pop_front();
@@ -627,6 +661,21 @@ mod tests {
                 && text == "wrapped model prompt"
                 && display_text == "[来自远程 IM：phone]\n你好"
         ));
+    }
+
+    #[test]
+    fn extracts_remote_im_reply_id_only_from_the_prompt_instruction() {
+        assert_eq!(
+            remote_im_reply_id(
+                "[IM_REPLY]\nOpening marker: <remote-im-reply id=\"rim-0123456789abcdef\">"
+            )
+            .as_deref(),
+            Some("rim-0123456789abcdef")
+        );
+        assert_eq!(
+            remote_im_reply_id("<remote-im-reply id=\"rim-0123456789abcdef\">answer"),
+            None
+        );
     }
 
     #[test]

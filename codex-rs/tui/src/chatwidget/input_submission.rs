@@ -3,6 +3,44 @@
 use super::*;
 
 impl ChatWidget {
+    fn remember_remote_im_reply(
+        &mut self,
+        accepted: bool,
+        reply_id: Option<String>,
+        committed_echo: UserMessageDisplay,
+    ) {
+        if !accepted {
+            return;
+        }
+        let Some(reply_id) = reply_id else {
+            return;
+        };
+        const MAX_PENDING_REMOTE_IM_REPLIES: usize = 32;
+        if self.remote_im_pending_replies.len() >= MAX_PENDING_REMOTE_IM_REPLIES {
+            self.remote_im_pending_replies.pop_front();
+        }
+        self.remote_im_pending_replies
+            .push_back((committed_echo, reply_id));
+    }
+
+    pub(super) fn submit_plain_user_message_with_remote_im_correlation(
+        &mut self,
+        user_message: UserMessage,
+    ) -> Option<AppCommand> {
+        let reply_id = crate::multi_ai_code_im_bridge::remote_im_reply_id(&user_message.text);
+        let committed_echo = user_message_display_for_history(
+            user_message.clone(),
+            &UserMessageHistoryRecord::UserMessageText,
+        );
+        let (accepted, command) = self.submit_user_message_with_history_and_shell_escape_policy(
+            user_message,
+            UserMessageHistoryRecord::UserMessageText,
+            ShellEscapePolicy::Disallow,
+        );
+        self.remember_remote_im_reply(accepted, reply_id, committed_echo);
+        command
+    }
+
     pub(crate) fn submit_user_message_from_remote_im(
         &mut self,
         text: String,
@@ -11,6 +49,7 @@ impl ChatWidget {
         if text.trim().is_empty() {
             return Err("IM message is empty".to_string());
         }
+        let reply_id = crate::multi_ai_code_im_bridge::remote_im_reply_id(&text);
         let display_text = if display_text.trim().is_empty() {
             text.clone()
         } else {
@@ -30,6 +69,7 @@ impl ChatWidget {
             history_record,
             ShellEscapePolicy::Disallow,
         );
+        self.remember_remote_im_reply(accepted, reply_id, committed_echo.clone());
         if accepted && suppress_committed_echo {
             const MAX_PENDING_REMOTE_IM_ECHOES: usize = 32;
             if self.remote_im_pending_user_message_echoes.len() >= MAX_PENDING_REMOTE_IM_ECHOES {
@@ -120,19 +160,6 @@ impl ChatWidget {
             ShellEscapePolicy::Allow,
         )
         .0
-    }
-
-    pub(super) fn submit_user_message_with_shell_escape_policy(
-        &mut self,
-        user_message: UserMessage,
-        shell_escape_policy: ShellEscapePolicy,
-    ) -> Option<AppCommand> {
-        self.submit_user_message_with_history_and_shell_escape_policy(
-            user_message,
-            UserMessageHistoryRecord::UserMessageText,
-            shell_escape_policy,
-        )
-        .1
     }
 
     fn submit_user_message_with_history_and_shell_escape_policy(

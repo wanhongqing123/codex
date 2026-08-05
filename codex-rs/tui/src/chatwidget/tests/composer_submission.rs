@@ -230,6 +230,11 @@ async fn remote_im_submission_does_not_render_committed_model_prompt_echo() {
             .any(|item| matches!(item, UserInput::Text { text, .. } if text == model_text))
     );
     complete_user_message(&mut chat, "remote-user-1", model_text);
+    assert_eq!(
+        chat.remote_im_active_reply_id.as_deref(),
+        Some("rim-0123456789abcdef")
+    );
+    assert!(chat.remote_im_pending_replies.is_empty());
 
     let mut rendered_user_messages = Vec::new();
     while let Ok(event) = rx.try_recv() {
