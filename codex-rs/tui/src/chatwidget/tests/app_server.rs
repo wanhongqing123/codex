@@ -651,6 +651,59 @@ async fn live_app_server_turn_completed_clears_working_status_after_answer_item(
 }
 
 #[tokio::test]
+async fn in_progress_turn_completed_notification_keeps_remote_im_reply_correlation() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.remote_im_active_reply_id = Some("rim-still-running".to_string());
+
+    chat.handle_server_notification(
+        ServerNotification::TurnCompleted(TurnCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn: AppServerTurn {
+                id: "turn-1".to_string(),
+                items_view: codex_app_server_protocol::TurnItemsView::Summary,
+                items: Vec::new(),
+                status: AppServerTurnStatus::InProgress,
+                error: None,
+                started_at: Some(0),
+                completed_at: None,
+                duration_ms: None,
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    assert_eq!(
+        chat.remote_im_active_reply_id.as_deref(),
+        Some("rim-still-running")
+    );
+}
+
+#[tokio::test]
+async fn failed_turn_without_error_clears_remote_im_reply_correlation() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.remote_im_active_reply_id = Some("rim-failed-without-error".to_string());
+
+    chat.handle_server_notification(
+        ServerNotification::TurnCompleted(TurnCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn: AppServerTurn {
+                id: "turn-1".to_string(),
+                items_view: codex_app_server_protocol::TurnItemsView::Summary,
+                items: Vec::new(),
+                status: AppServerTurnStatus::Failed,
+                error: None,
+                started_at: Some(0),
+                completed_at: Some(1),
+                duration_ms: Some(1),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    assert!(chat.remote_im_active_reply_id.is_none());
+}
+
+#[tokio::test]
 async fn live_app_server_turn_started_sets_feedback_turn_id() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 

@@ -130,10 +130,13 @@ impl ChatWidget {
                         );
                     }
                 } else {
-                    if !from_replay {
+                    if !from_replay
+                        && let Some(reply_id) = self.remote_im_active_reply_id.as_deref()
+                    {
                         crate::multi_ai_code_im_bridge::send_turn_error(
                             &notification.error.message,
                             Some(notification.turn_id.as_str()),
+                            reply_id,
                         );
                     }
                     self.last_non_retry_error = Some((
@@ -249,6 +252,7 @@ impl ChatWidget {
         self.last_rendered_user_message_display = None;
         match notification.turn.status {
             TurnStatus::Completed => {
+                let remote_im_reply_id = self.remote_im_active_reply_id.take();
                 let last_agent_message =
                     notification
                         .turn
@@ -280,6 +284,16 @@ impl ChatWidget {
                             .map_or(ThreadItemRenderSource::Live, ThreadItemRenderSource::Replay),
                     );
                 }
+                if let Some(reply_id) = remote_im_reply_id
+                    && replay_kind.is_none()
+                    && let Some((_, id, text)) = &last_agent_message
+                {
+                    crate::multi_ai_code_im_bridge::send_assistant_final(
+                        text,
+                        Some(id.as_str()),
+                        &reply_id,
+                    );
+                }
                 self.last_non_retry_error = None;
                 self.on_task_complete(
                     last_agent_message.map(|(_, _, text)| text),
@@ -288,6 +302,7 @@ impl ChatWidget {
                 );
             }
             TurnStatus::Interrupted => {
+                self.remote_im_active_reply_id = None;
                 self.last_non_retry_error = None;
                 let reason = if self
                     .turn_lifecycle
@@ -300,6 +315,7 @@ impl ChatWidget {
                 self.on_interrupted_turn(reason);
             }
             TurnStatus::Failed => {
+                let remote_im_reply_id = self.remote_im_active_reply_id.take();
                 let turn_id = notification.turn.id.clone();
                 if let Some(error) = notification.turn.error {
                     if self.last_non_retry_error.as_ref()
@@ -307,15 +323,27 @@ impl ChatWidget {
                     {
                         self.last_non_retry_error = None;
                     } else {
-                        if replay_kind.is_none() {
+                        if let Some(reply_id) = remote_im_reply_id.as_deref()
+                            && replay_kind.is_none()
+                        {
                             crate::multi_ai_code_im_bridge::send_turn_error(
                                 &error.message,
                                 Some(turn_id.as_str()),
+                                reply_id,
                             );
                         }
                         self.handle_non_retry_error(error.message, error.codex_error_info);
                     }
                 } else {
+                    if let Some(reply_id) = remote_im_reply_id.as_deref()
+                        && replay_kind.is_none()
+                    {
+                        crate::multi_ai_code_im_bridge::send_turn_error(
+                            "Codex turn failed without an error message.",
+                            Some(turn_id.as_str()),
+                            reply_id,
+                        );
+                    }
                     self.last_non_retry_error = None;
                     self.finalize_turn();
                     self.request_redraw();
