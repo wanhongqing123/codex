@@ -159,7 +159,12 @@ async fn remote_im_submission_keeps_model_prompt_out_of_tui_preview() {
     let display_text = "[来自远程 IM：phone]\n你好";
 
     assert_eq!(
-        chat.submit_user_message_from_remote_im(model_text.to_string(), display_text.to_string()),
+        chat.submit_user_message_from_remote_im(
+            model_text.to_string(),
+            display_text.to_string(),
+            Some("rim-0123456789abcdef".to_string()),
+            Some("task-fixed".to_string()),
+        ),
         Ok(())
     );
     assert!(op_rx.try_recv().is_err());
@@ -216,7 +221,12 @@ async fn remote_im_submission_does_not_render_committed_model_prompt_echo() {
         "Opening marker: <remote-im-reply id=\"rim-0123456789abcdef\">"
     );
     assert_eq!(
-        chat.submit_user_message_from_remote_im(model_text.to_string(), display_text.to_string()),
+        chat.submit_user_message_from_remote_im(
+            model_text.to_string(),
+            display_text.to_string(),
+            Some("rim-0123456789abcdef".to_string()),
+            Some("task-fixed".to_string()),
+        ),
         Ok(())
     );
 
