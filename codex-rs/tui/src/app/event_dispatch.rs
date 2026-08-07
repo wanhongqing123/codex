@@ -216,11 +216,15 @@ impl App {
                 request_id,
                 text,
                 display_text,
+                reply_id,
+                task_id,
             } => {
-                match self
-                    .chat_widget
-                    .submit_user_message_from_remote_im(text, display_text)
-                {
+                match self.chat_widget.submit_user_message_from_remote_im(
+                    text,
+                    display_text,
+                    reply_id,
+                    task_id,
+                ) {
                     Ok(()) => crate::multi_ai_code_im_bridge::send_control_result(
                         &request_id,
                         true,

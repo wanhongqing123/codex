@@ -329,8 +329,12 @@ impl ChatWidget {
                 AgentMessageContent::Text { text } => message.push_str(text),
             }
         }
-        if !from_replay {
-            crate::multi_ai_code_im_bridge::send_assistant_text(&message, Some(item.id.as_str()));
+        if !from_replay && matches!(item.phase, Some(MessagePhase::Commentary)) {
+            crate::multi_ai_code_im_bridge::send_assistant_text(
+                &message,
+                Some(item.id.as_str()),
+                self.remote_im_active_task_id.as_deref(),
+            );
         }
         let parsed = parse_assistant_markdown(&message, self.config.cwd.as_path());
         self.finalize_completed_assistant_message(

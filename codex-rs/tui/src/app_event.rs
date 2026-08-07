@@ -324,6 +324,8 @@ pub(crate) enum AppEvent {
         request_id: String,
         text: String,
         display_text: String,
+        reply_id: Option<String>,
+        task_id: Option<String>,
     },
 
     /// Interrupt the active Codex turn from the Multi-AI Code IM control channel.

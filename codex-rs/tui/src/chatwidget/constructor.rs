@@ -155,6 +155,7 @@ impl ChatWidget {
             remote_im_pending_user_message_echoes: VecDeque::new(),
             remote_im_pending_replies: VecDeque::new(),
             remote_im_active_reply_id: None,
+            remote_im_active_task_id: None,
             plan_stream_controller: None,
             pending_stream_consolidations: 0,
             clipboard_lease: None,

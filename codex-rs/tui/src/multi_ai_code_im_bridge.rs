@@ -190,6 +190,8 @@ struct ControlPayload {
     fg: Option<String>,
     #[serde(rename = "replyId")]
     reply_id: Option<String>,
+    #[serde(rename = "taskId")]
+    task_id: Option<String>,
     #[serde(rename = "requestId")]
     request_id: Option<String>,
 }
@@ -287,6 +289,8 @@ fn control_payload_to_app_event(payload: ControlPayload, token: &str) -> Option<
             request_id: payload.request_id?,
             text: payload.text.unwrap_or_default(),
             display_text: payload.display_text.unwrap_or_default(),
+            reply_id: payload.reply_id,
+            task_id: payload.task_id,
         }),
         "interrupt" => Some(AppEvent::MultiAiCodeImInterrupt {
             request_id: payload.request_id?,
@@ -311,23 +315,48 @@ fn control_payload_to_app_event(payload: ControlPayload, token: &str) -> Option<
     }
 }
 
-pub(crate) fn send_assistant_text(text: &str, message_id: Option<&str>) {
-    send_reliable_text("assistant_text", text, message_id, None);
+pub(crate) fn send_task_started(reply_id: &str, task_id: Option<&str>) {
+    send_reliable_text("task_started", "running", None, Some(reply_id), task_id);
 }
 
-pub(crate) fn send_assistant_final(text: &str, message_id: Option<&str>, reply_id: &str) {
+pub(crate) fn send_task_activity(task_id: &str) {
+    send_reliable_text("task_activity", "running", None, None, Some(task_id));
+}
+
+pub(crate) fn send_assistant_text(text: &str, message_id: Option<&str>, task_id: Option<&str>) {
+    send_reliable_text("assistant_text", text, message_id, None, task_id);
+}
+
+pub(crate) fn send_assistant_final(
+    text: &str,
+    message_id: Option<&str>,
+    reply_id: &str,
+    task_id: Option<&str>,
+) {
     let message_id = message_id.map(|id| format!("{id}:final"));
     send_reliable_text(
         "assistant_final",
         text,
         message_id.as_deref(),
         Some(reply_id),
+        task_id,
     );
 }
 
-pub(crate) fn send_turn_error(text: &str, turn_id: Option<&str>, reply_id: &str) {
+pub(crate) fn send_turn_error(
+    text: &str,
+    turn_id: Option<&str>,
+    reply_id: &str,
+    task_id: Option<&str>,
+) {
     let message_id = turn_id.map(|id| format!("{id}:error"));
-    send_reliable_text("turn_error", text, message_id.as_deref(), Some(reply_id));
+    send_reliable_text(
+        "turn_error",
+        text,
+        message_id.as_deref(),
+        Some(reply_id),
+        task_id,
+    );
 }
 
 fn send_reliable_text(
@@ -335,6 +364,7 @@ fn send_reliable_text(
     text: &str,
     message_id: Option<&str>,
     reply_id: Option<&str>,
+    task_id: Option<&str>,
 ) {
     if text.is_empty() {
         return;
@@ -351,6 +381,7 @@ fn send_reliable_text(
         text: text.to_string(),
         message_id,
         reply_id: reply_id.map(str::to_string),
+        task_id: task_id.map(str::to_string),
     });
 }
 
@@ -389,6 +420,7 @@ enum DataMsg {
         text: String,
         message_id: String,
         reply_id: Option<String>,
+        task_id: Option<String>,
     },
     ControlResult {
         line: String,
@@ -447,6 +479,7 @@ fn run_data_manager(config: BridgeConfig, rx: mpsc::Receiver<DataMsg>, tx: mpsc:
                 text,
                 message_id,
                 reply_id,
+                task_id,
             }) => {
                 let mut payload = json!({
                     "token": config.token,
@@ -456,6 +489,9 @@ fn run_data_manager(config: BridgeConfig, rx: mpsc::Receiver<DataMsg>, tx: mpsc:
                 });
                 if let Some(reply_id) = reply_id {
                     payload["replyId"] = reply_id.into();
+                }
+                if let Some(task_id) = task_id {
+                    payload["taskId"] = task_id.into();
                 }
                 let line = format!("{payload}\n");
                 if pending.len() >= MAX_PENDING {
@@ -597,6 +633,7 @@ mod tests {
             bg: None,
             fg: None,
             reply_id: None,
+            task_id: None,
             request_id: Some("req-1".to_string()),
         }
     }
@@ -647,6 +684,8 @@ mod tests {
         let mut payload = control_payload("submit_user_message");
         payload.text = Some("wrapped model prompt".to_string());
         payload.display_text = Some("[来自远程 IM：phone]\n你好".to_string());
+        payload.reply_id = Some("rim-fixed".to_string());
+        payload.task_id = Some("task-fixed".to_string());
 
         let event = control_payload_to_app_event(payload, "token")
             .expect("expected ordinary IM message to map to app event");
@@ -656,10 +695,14 @@ mod tests {
             AppEvent::MultiAiCodeImSubmitUserMessage {
                 request_id,
                 text,
-                display_text
+                display_text,
+                reply_id,
+                task_id
             } if request_id == "req-1"
                 && text == "wrapped model prompt"
                 && display_text == "[来自远程 IM：phone]\n你好"
+                && reply_id.as_deref() == Some("rim-fixed")
+                && task_id.as_deref() == Some("task-fixed")
         ));
     }
 

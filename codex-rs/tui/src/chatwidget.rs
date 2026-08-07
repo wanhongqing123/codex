@@ -590,8 +590,9 @@ pub(crate) struct ChatWidget {
     stream_controller: Option<StreamController>,
     remote_im_reply_display: crate::multi_ai_code_im_bridge::RemoteImReplyDisplayFilter,
     remote_im_pending_user_message_echoes: VecDeque<UserMessageDisplay>,
-    remote_im_pending_replies: VecDeque<(UserMessageDisplay, String)>,
+    remote_im_pending_replies: VecDeque<(UserMessageDisplay, String, Option<String>)>,
     remote_im_active_reply_id: Option<String>,
+    remote_im_active_task_id: Option<String>,
     // Stream lifecycle controller for proposed plan output.
     plan_stream_controller: Option<PlanStreamController>,
     pending_stream_consolidations: usize,
@@ -1293,10 +1294,12 @@ impl ChatWidget {
         if let Some(index) = self
             .remote_im_pending_replies
             .iter()
-            .position(|(pending, _)| pending == &display)
-            && let Some((_, reply_id)) = self.remote_im_pending_replies.remove(index)
+            .position(|(pending, _, _)| pending == &display)
+            && let Some((_, reply_id, task_id)) = self.remote_im_pending_replies.remove(index)
         {
+            crate::multi_ai_code_im_bridge::send_task_started(&reply_id, task_id.as_deref());
             self.remote_im_active_reply_id = Some(reply_id);
+            self.remote_im_active_task_id = task_id;
         }
 
         if let Some(index) = self
