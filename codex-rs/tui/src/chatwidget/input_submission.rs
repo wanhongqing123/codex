@@ -3,6 +3,19 @@
 use super::*;
 
 impl ChatWidget {
+    pub(super) fn set_remote_im_input_origin(&mut self, remote_im: bool) {
+        if self.remote_im_forwarding_active == remote_im {
+            return;
+        }
+        self.remote_im_forwarding_active = remote_im;
+        crate::multi_ai_code_im_bridge::send_input_origin(remote_im);
+        if !remote_im {
+            self.remote_im_active_reply_id = None;
+            self.remote_im_active_task_id = None;
+            self.remote_im_pending_replies.clear();
+        }
+    }
+
     fn remember_remote_im_reply(
         &mut self,
         accepted: bool,
@@ -29,6 +42,7 @@ impl ChatWidget {
         user_message: UserMessage,
     ) -> Option<AppCommand> {
         let reply_id = crate::multi_ai_code_im_bridge::remote_im_reply_id(&user_message.text);
+        self.set_remote_im_input_origin(reply_id.is_some());
         let committed_echo = user_message_display_for_history(
             user_message.clone(),
             &UserMessageHistoryRecord::UserMessageText,
@@ -46,6 +60,7 @@ impl ChatWidget {
         &mut self,
         text: String,
         display_text: String,
+        remote_im_input: bool,
         reply_id: Option<String>,
         task_id: Option<String>,
     ) -> Result<(), String> {
@@ -73,6 +88,12 @@ impl ChatWidget {
             history_record,
             ShellEscapePolicy::Disallow,
         );
+        if accepted {
+            self.set_remote_im_input_origin(remote_im_input);
+            if remote_im_input {
+                crate::multi_ai_code_im_bridge::send_source_task_started();
+            }
+        }
         self.remember_remote_im_reply(accepted, reply_id, task_id, committed_echo.clone());
         if accepted && suppress_committed_echo {
             const MAX_PENDING_REMOTE_IM_ECHOES: usize = 32;
@@ -158,6 +179,7 @@ impl ChatWidget {
         user_message: UserMessage,
         history_record: UserMessageHistoryRecord,
     ) -> bool {
+        self.set_remote_im_input_origin(false);
         self.submit_user_message_with_history_and_shell_escape_policy(
             user_message,
             history_record,

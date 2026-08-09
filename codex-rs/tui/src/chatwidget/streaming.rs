@@ -330,11 +330,18 @@ impl ChatWidget {
             }
         }
         if !from_replay && matches!(item.phase, Some(MessagePhase::Commentary)) {
-            crate::multi_ai_code_im_bridge::send_assistant_text(
-                &message,
-                Some(item.id.as_str()),
-                self.remote_im_active_task_id.as_deref(),
-            );
+            if self.remote_im_forwarding_active {
+                crate::multi_ai_code_im_bridge::send_source_assistant_text(
+                    &message,
+                    Some(item.id.as_str()),
+                );
+            } else if self.remote_im_active_task_id.is_some() {
+                crate::multi_ai_code_im_bridge::send_assistant_text(
+                    &message,
+                    Some(item.id.as_str()),
+                    self.remote_im_active_task_id.as_deref(),
+                );
+            }
         }
         let parsed = parse_assistant_markdown(&message, self.config.cwd.as_path());
         self.finalize_completed_assistant_message(

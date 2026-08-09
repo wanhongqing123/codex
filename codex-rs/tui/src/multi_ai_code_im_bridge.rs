@@ -185,6 +185,8 @@ struct ControlPayload {
     text: Option<String>,
     #[serde(rename = "displayText")]
     display_text: Option<String>,
+    #[serde(rename = "inputOrigin")]
+    input_origin: Option<String>,
     // 运行时主题：宿主终端的背景/前景色（6 位十六进制，可带 #）。
     bg: Option<String>,
     fg: Option<String>,
@@ -285,13 +287,21 @@ fn control_payload_to_app_event(payload: ControlPayload, token: &str) -> Option<
             task: payload.task.unwrap_or_default(),
             reply_id: payload.reply_id,
         }),
-        "submit_user_message" => Some(AppEvent::MultiAiCodeImSubmitUserMessage {
-            request_id: payload.request_id?,
-            text: payload.text.unwrap_or_default(),
-            display_text: payload.display_text.unwrap_or_default(),
-            reply_id: payload.reply_id,
-            task_id: payload.task_id,
-        }),
+        "submit_user_message" => {
+            let remote_im_input = match payload.input_origin.as_deref() {
+                Some("remote-im") => true,
+                Some("local") => false,
+                _ => payload.reply_id.is_some() || payload.task_id.is_some(),
+            };
+            Some(AppEvent::MultiAiCodeImSubmitUserMessage {
+                request_id: payload.request_id?,
+                text: payload.text.unwrap_or_default(),
+                display_text: payload.display_text.unwrap_or_default(),
+                remote_im_input,
+                reply_id: payload.reply_id,
+                task_id: payload.task_id,
+            })
+        }
         "interrupt" => Some(AppEvent::MultiAiCodeImInterrupt {
             request_id: payload.request_id?,
         }),
@@ -321,6 +331,38 @@ pub(crate) fn send_task_started(reply_id: &str, task_id: Option<&str>) {
 
 pub(crate) fn send_task_activity(task_id: &str) {
     send_reliable_text("task_activity", "running", None, None, Some(task_id));
+}
+
+pub(crate) fn send_input_origin(remote_im: bool) {
+    send_reliable_text(
+        "input_origin",
+        if remote_im { "remote-im" } else { "tui" },
+        None,
+        None,
+        None,
+    );
+}
+
+pub(crate) fn send_source_task_started() {
+    send_reliable_text("task_started", "running", None, None, None);
+}
+
+pub(crate) fn send_source_task_activity() {
+    send_reliable_text("task_activity", "running", None, None, None);
+}
+
+pub(crate) fn send_source_assistant_text(text: &str, message_id: Option<&str>) {
+    send_reliable_text("assistant_text", text, message_id, None, None);
+}
+
+pub(crate) fn send_source_assistant_final(text: &str, message_id: Option<&str>) {
+    let message_id = message_id.map(|id| format!("{id}:final"));
+    send_reliable_text("assistant_final", text, message_id.as_deref(), None, None);
+}
+
+pub(crate) fn send_source_turn_error(text: &str, turn_id: Option<&str>) {
+    let message_id = turn_id.map(|id| format!("{id}:error"));
+    send_reliable_text("turn_error", text, message_id.as_deref(), None, None);
 }
 
 pub(crate) fn send_assistant_text(text: &str, message_id: Option<&str>, task_id: Option<&str>) {
@@ -630,6 +672,7 @@ mod tests {
             task: None,
             text: None,
             display_text: None,
+            input_origin: None,
             bg: None,
             fg: None,
             reply_id: None,
@@ -684,6 +727,7 @@ mod tests {
         let mut payload = control_payload("submit_user_message");
         payload.text = Some("wrapped model prompt".to_string());
         payload.display_text = Some("[来自远程 IM：phone]\n你好".to_string());
+        payload.input_origin = Some("remote-im".to_string());
         payload.reply_id = Some("rim-fixed".to_string());
         payload.task_id = Some("task-fixed".to_string());
 
@@ -696,11 +740,13 @@ mod tests {
                 request_id,
                 text,
                 display_text,
+                remote_im_input,
                 reply_id,
                 task_id
             } if request_id == "req-1"
                 && text == "wrapped model prompt"
                 && display_text == "[来自远程 IM：phone]\n你好"
+                && remote_im_input
                 && reply_id.as_deref() == Some("rim-fixed")
                 && task_id.as_deref() == Some("task-fixed")
         ));

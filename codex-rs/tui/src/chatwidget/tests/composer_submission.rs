@@ -162,6 +162,7 @@ async fn remote_im_submission_keeps_model_prompt_out_of_tui_preview() {
         chat.submit_user_message_from_remote_im(
             model_text.to_string(),
             display_text.to_string(),
+            true,
             Some("rim-0123456789abcdef".to_string()),
             Some("task-fixed".to_string()),
         ),
@@ -184,6 +185,39 @@ async fn remote_im_submission_keeps_model_prompt_out_of_tui_preview() {
         user_message_preview_text(&queued.user_message, Some(history)),
         display_text
     );
+}
+
+#[tokio::test]
+async fn remote_im_forwarding_stays_active_until_direct_tui_input() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    assert!(!chat.remote_im_forwarding_active);
+    assert_eq!(
+        chat.submit_user_message_from_remote_im(
+            "[来自远程 IM：phone]\n第一条".to_string(),
+            "[来自远程 IM：phone]\n第一条".to_string(),
+            true,
+            None,
+            None,
+        ),
+        Ok(())
+    );
+    assert!(chat.remote_im_forwarding_active);
+
+    assert_eq!(
+        chat.submit_user_message_from_remote_im(
+            "[来自远程 IM：phone]\n第二条".to_string(),
+            "[来自远程 IM：phone]\n第二条".to_string(),
+            true,
+            None,
+            None,
+        ),
+        Ok(())
+    );
+    assert!(chat.remote_im_forwarding_active);
+
+    chat.submit_user_message(UserMessage::from("来自 TUI 的本地输入"));
+    assert!(!chat.remote_im_forwarding_active);
 }
 
 #[tokio::test]
@@ -224,6 +258,7 @@ async fn remote_im_submission_does_not_render_committed_model_prompt_echo() {
         chat.submit_user_message_from_remote_im(
             model_text.to_string(),
             display_text.to_string(),
+            true,
             Some("rim-0123456789abcdef".to_string()),
             Some("task-fixed".to_string()),
         ),

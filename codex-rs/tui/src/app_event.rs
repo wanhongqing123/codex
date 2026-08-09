@@ -351,6 +351,7 @@ pub(crate) enum AppEvent {
         request_id: String,
         text: String,
         display_text: String,
+        remote_im_input: bool,
         reply_id: Option<String>,
         task_id: Option<String>,
     },
