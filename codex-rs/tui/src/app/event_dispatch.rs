@@ -216,12 +216,14 @@ impl App {
                 request_id,
                 text,
                 display_text,
+                remote_im_input,
                 reply_id,
                 task_id,
             } => {
                 match self.chat_widget.submit_user_message_from_remote_im(
                     text,
                     display_text,
+                    remote_im_input,
                     reply_id,
                     task_id,
                 ) {

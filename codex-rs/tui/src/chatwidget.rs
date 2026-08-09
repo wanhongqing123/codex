@@ -591,6 +591,7 @@ pub(crate) struct ChatWidget {
     remote_im_reply_display: crate::multi_ai_code_im_bridge::RemoteImReplyDisplayFilter,
     remote_im_pending_user_message_echoes: VecDeque<UserMessageDisplay>,
     remote_im_pending_replies: VecDeque<(UserMessageDisplay, String, Option<String>)>,
+    remote_im_forwarding_active: bool,
     remote_im_active_reply_id: Option<String>,
     remote_im_active_task_id: Option<String>,
     // Stream lifecycle controller for proposed plan output.
