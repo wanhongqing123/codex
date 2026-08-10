@@ -162,6 +162,7 @@ async fn remote_im_submission_keeps_model_prompt_out_of_tui_preview() {
         chat.submit_user_message_from_remote_im(
             model_text.to_string(),
             display_text.to_string(),
+            Vec::new(),
             true,
             Some("rim-0123456789abcdef".to_string()),
             Some("task-fixed".to_string()),
@@ -188,6 +189,37 @@ async fn remote_im_submission_keeps_model_prompt_out_of_tui_preview() {
 }
 
 #[tokio::test]
+async fn source_submission_preserves_local_image_attachments() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let image_path = std::path::PathBuf::from("/tmp/scheduled-task-image.png");
+
+    assert_eq!(
+        chat.submit_user_message_from_remote_im(
+            "inspect the attached image".to_string(),
+            "inspect the attached image".to_string(),
+            vec![image_path.clone()],
+            false,
+            None,
+            None,
+        ),
+        Ok(())
+    );
+    assert!(op_rx.try_recv().is_err());
+
+    let queued = chat
+        .input_queue
+        .queued_user_messages
+        .front()
+        .expect("source-submitted message should queue until the session is configured");
+    assert_eq!(queued.user_message.local_images.len(), 1);
+    assert_eq!(queued.user_message.local_images[0].path, image_path);
+    assert_eq!(
+        queued.user_message.local_images[0].placeholder,
+        "[Image #1]"
+    );
+}
+
+#[tokio::test]
 async fn remote_im_forwarding_stays_active_until_direct_tui_input() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
@@ -196,6 +228,7 @@ async fn remote_im_forwarding_stays_active_until_direct_tui_input() {
         chat.submit_user_message_from_remote_im(
             "[来自远程 IM：phone]\n第一条".to_string(),
             "[来自远程 IM：phone]\n第一条".to_string(),
+            Vec::new(),
             true,
             None,
             None,
@@ -208,6 +241,7 @@ async fn remote_im_forwarding_stays_active_until_direct_tui_input() {
         chat.submit_user_message_from_remote_im(
             "[来自远程 IM：phone]\n第二条".to_string(),
             "[来自远程 IM：phone]\n第二条".to_string(),
+            Vec::new(),
             true,
             None,
             None,
@@ -258,6 +292,7 @@ async fn remote_im_submission_does_not_render_committed_model_prompt_echo() {
         chat.submit_user_message_from_remote_im(
             model_text.to_string(),
             display_text.to_string(),
+            Vec::new(),
             true,
             Some("rim-0123456789abcdef".to_string()),
             Some("task-fixed".to_string()),
