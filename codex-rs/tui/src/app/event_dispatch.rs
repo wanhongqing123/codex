@@ -216,6 +216,7 @@ impl App {
                 request_id,
                 text,
                 display_text,
+                local_image_paths,
                 remote_im_input,
                 reply_id,
                 task_id,
@@ -223,6 +224,7 @@ impl App {
                 match self.chat_widget.submit_user_message_from_remote_im(
                     text,
                     display_text,
+                    local_image_paths,
                     remote_im_input,
                     reply_id,
                     task_id,

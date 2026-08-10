@@ -6,6 +6,7 @@ use std::io::BufReader;
 use std::io::Write;
 use std::net::Shutdown;
 use std::net::TcpStream;
+use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -173,6 +174,16 @@ pub(crate) fn init(endpoint: Option<String>) {
 }
 
 #[derive(Deserialize)]
+struct ControlAttachment {
+    #[serde(rename = "type")]
+    attachment_type: String,
+    #[serde(rename = "localPath")]
+    local_path: String,
+    #[serde(rename = "mimeType")]
+    mime_type: String,
+}
+
+#[derive(Deserialize)]
 struct ControlPayload {
     token: Option<String>,
     kind: Option<String>,
@@ -187,6 +198,8 @@ struct ControlPayload {
     display_text: Option<String>,
     #[serde(rename = "inputOrigin")]
     input_origin: Option<String>,
+    #[serde(default)]
+    attachments: Vec<ControlAttachment>,
     // 运行时主题：宿主终端的背景/前景色（6 位十六进制，可带 #）。
     bg: Option<String>,
     fg: Option<String>,
@@ -297,6 +310,18 @@ fn control_payload_to_app_event(payload: ControlPayload, token: &str) -> Option<
                 request_id: payload.request_id?,
                 text: payload.text.unwrap_or_default(),
                 display_text: payload.display_text.unwrap_or_default(),
+                local_image_paths: payload
+                    .attachments
+                    .into_iter()
+                    .take(4)
+                    .filter_map(|attachment| {
+                        let path = PathBuf::from(attachment.local_path);
+                        (attachment.attachment_type == "image"
+                            && attachment.mime_type.starts_with("image/")
+                            && path.is_absolute())
+                        .then_some(path)
+                    })
+                    .collect(),
                 remote_im_input,
                 reply_id: payload.reply_id,
                 task_id: payload.task_id,
@@ -673,6 +698,7 @@ mod tests {
             text: None,
             display_text: None,
             input_origin: None,
+            attachments: Vec::new(),
             bg: None,
             fg: None,
             reply_id: None,
@@ -728,6 +754,14 @@ mod tests {
         payload.text = Some("wrapped model prompt".to_string());
         payload.display_text = Some("[来自远程 IM：phone]\n你好".to_string());
         payload.input_origin = Some("remote-im".to_string());
+        let image_path = std::env::current_dir()
+            .expect("current directory")
+            .join("task-image.png");
+        payload.attachments = vec![ControlAttachment {
+            attachment_type: "image".to_string(),
+            local_path: image_path.to_string_lossy().into_owned(),
+            mime_type: "image/png".to_string(),
+        }];
         payload.reply_id = Some("rim-fixed".to_string());
         payload.task_id = Some("task-fixed".to_string());
 
@@ -740,12 +774,14 @@ mod tests {
                 request_id,
                 text,
                 display_text,
+                local_image_paths,
                 remote_im_input,
                 reply_id,
                 task_id
             } if request_id == "req-1"
                 && text == "wrapped model prompt"
                 && display_text == "[来自远程 IM：phone]\n你好"
+                && local_image_paths == vec![image_path]
                 && remote_im_input
                 && reply_id.as_deref() == Some("rim-fixed")
                 && task_id.as_deref() == Some("task-fixed")

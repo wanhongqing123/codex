@@ -60,6 +60,7 @@ impl ChatWidget {
         &mut self,
         text: String,
         display_text: String,
+        local_image_paths: Vec<PathBuf>,
         remote_im_input: bool,
         reply_id: Option<String>,
         task_id: Option<String>,
@@ -79,12 +80,14 @@ impl ChatWidget {
             text_elements: Vec::new(),
         });
         let suppress_committed_echo = !self.turn_lifecycle.agent_turn_running;
+        let user_message = create_initial_user_message(Some(text), local_image_paths, Vec::new())
+            .expect("non-empty source-submitted user message");
         let committed_echo = user_message_display_for_history(
-            UserMessage::from(text.clone()),
+            user_message.clone(),
             &UserMessageHistoryRecord::UserMessageText,
         );
         let (accepted, _) = self.submit_user_message_with_history_and_shell_escape_policy(
-            UserMessage::from(text),
+            user_message,
             history_record,
             ShellEscapePolicy::Disallow,
         );

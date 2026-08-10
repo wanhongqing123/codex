@@ -324,6 +324,7 @@ pub(crate) enum AppEvent {
         request_id: String,
         text: String,
         display_text: String,
+        local_image_paths: Vec<std::path::PathBuf>,
         remote_im_input: bool,
         reply_id: Option<String>,
         task_id: Option<String>,
