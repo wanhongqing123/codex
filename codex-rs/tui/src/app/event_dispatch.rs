@@ -207,8 +207,12 @@ impl App {
                             None,
                         );
                         if let Some(switched_model) = switched_model {
-                            self.sync_active_thread_model_setting(app_server, switched_model)
-                                .await;
+                            self.sync_active_thread_model_setting(
+                                app_server,
+                                switched_model,
+                                /*effort*/ None,
+                            )
+                            .await;
                             self.sync_active_thread_service_tier_to_cached_session()
                                 .await;
                         }

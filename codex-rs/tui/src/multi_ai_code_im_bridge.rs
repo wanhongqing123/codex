@@ -640,10 +640,9 @@ fn write_line(
     }
     if let Some(writer) = stream.as_mut()
         && writer.write_all(line.as_bytes()).is_err()
+        && let Some(old) = stream.take()
     {
-        if let Some(old) = stream.take() {
-            let _ = old.shutdown(Shutdown::Both);
-        }
+        let _ = old.shutdown(Shutdown::Both);
     }
 }
 

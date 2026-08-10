@@ -149,8 +149,8 @@ mod model_catalog;
 mod model_migration;
 mod motion;
 mod multi_agents;
-mod named_session_lookup;
 mod multi_ai_code_im_bridge;
+mod named_session_lookup;
 mod notifications;
 #[cfg(any(not(debug_assertions), test))]
 mod npm_registry;
