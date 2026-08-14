@@ -163,6 +163,7 @@ mod tests {
             approval_id: approval_id.map(str::to_string),
             turn_id: "turn".to_string(),
             environment_id: None,
+            raw_command: None,
             command: vec!["true".to_string()],
             cwd: AbsolutePathBuf::current_dir().expect("current dir"),
             reason: None,

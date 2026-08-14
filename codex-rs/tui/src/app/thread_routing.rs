@@ -881,12 +881,16 @@ impl App {
         else {
             return Ok(false);
         };
+        let request_id_for_retry = resolution.request_id.clone();
 
         match app_server
             .resolve_server_request(resolution.request_id, resolution.result)
             .await
         {
             Ok(()) => {
+                if let AppCommand::ExecApproval { id, .. } = op {
+                    self.chat_widget.note_remote_im_exec_approval_resolved(id);
+                }
                 if ThreadEventStore::op_can_change_pending_replay_state(op) {
                     self.note_thread_outbound_op(thread_id, op).await;
                     self.refresh_pending_thread_approvals().await;
@@ -895,6 +899,16 @@ impl App {
                 Ok(true)
             }
             Err(err) => {
+                if let AppCommand::ExecApproval { id, .. } = op {
+                    self.pending_app_server_requests
+                        .restore_exec_approval(id.clone(), request_id_for_retry);
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to resolve app-server request for thread {thread_id}: {err}"
+                    ));
+                    return Err(color_eyre::eyre::eyre!(
+                        "failed to resolve command approval for thread {thread_id}: {err}"
+                    ));
+                }
                 self.chat_widget.add_error_message(format!(
                     "Failed to resolve app-server request for thread {thread_id}: {err}"
                 ));

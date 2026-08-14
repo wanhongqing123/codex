@@ -4,6 +4,14 @@ use super::*;
 
 impl ChatWidget {
     pub(super) fn set_remote_im_input_origin(&mut self, remote_im: bool) {
+        if !remote_im {
+            // Revoke the remote capability synchronously inside the TUI before
+            // notifying the host. The data notification and approval control
+            // response use independent sockets, so relying on the host to send
+            // a later cancel would leave a window where a phone approval could
+            // still win after the local user had taken over the turn.
+            self.invalidate_remote_im_exec_approvals();
+        }
         if self.remote_im_forwarding_active == remote_im {
             return;
         }
@@ -21,6 +29,7 @@ impl ChatWidget {
         accepted: bool,
         reply_id: Option<String>,
         task_id: Option<String>,
+        source_routed: bool,
         committed_echo: UserMessageDisplay,
     ) {
         if !accepted {
@@ -34,7 +43,86 @@ impl ChatWidget {
             self.remote_im_pending_replies.pop_front();
         }
         self.remote_im_pending_replies
-            .push_back((committed_echo, reply_id, task_id));
+            .push_back(PendingRemoteImReply {
+                committed_echo,
+                reply_id,
+                task_id,
+                source_routed,
+                bound_turn_id: None,
+            });
+    }
+
+    pub(super) fn bind_pending_remote_im_route_to_turn(&mut self, turn_id: &str) {
+        let pending_route = self
+            .remote_im_pending_replies
+            .iter_mut()
+            .find(|pending| pending.bound_turn_id.is_none())
+            .map(|pending| {
+                pending.bound_turn_id = Some(turn_id.to_string());
+                RemoteImTurnRoute {
+                    reply_id: pending.reply_id.clone(),
+                    task_id: pending.task_id.clone(),
+                    source_routed: pending.source_routed,
+                }
+            });
+        let active_route = || {
+            self.remote_im_active_reply_id
+                .as_ref()
+                .map(|reply_id| RemoteImTurnRoute {
+                    reply_id: reply_id.clone(),
+                    task_id: self.remote_im_active_task_id.clone(),
+                    source_routed: self.remote_im_forwarding_active,
+                })
+        };
+        if let Some(route) = pending_route.or_else(active_route) {
+            self.remember_remote_im_turn_route_if_absent(turn_id.to_string(), route);
+        }
+    }
+
+    pub(super) fn remember_remote_im_turn_route_if_absent(
+        &mut self,
+        turn_id: String,
+        route: RemoteImTurnRoute,
+    ) {
+        if self.remote_im_turn_routes.contains_key(&turn_id) {
+            return;
+        }
+
+        // Completed turns are removed immediately. The cap is defense in depth
+        // for malformed or partial notification streams that never complete.
+        const MAX_REMOTE_IM_TURN_ROUTES: usize = 64;
+        while self.remote_im_turn_routes.len() >= MAX_REMOTE_IM_TURN_ROUTES {
+            let Some(oldest_turn_id) = self.remote_im_turn_route_order.pop_front() else {
+                break;
+            };
+            self.remote_im_turn_routes.remove(&oldest_turn_id);
+        }
+        self.remote_im_turn_route_order.push_back(turn_id.clone());
+        self.remote_im_turn_routes.insert(turn_id, route);
+    }
+
+    pub(super) fn finish_remote_im_turn_route(&mut self, turn_id: &str) {
+        if self.remote_im_turn_routes.remove(turn_id).is_some()
+            && let Some(index) = self
+                .remote_im_turn_route_order
+                .iter()
+                .position(|candidate| candidate == turn_id)
+        {
+            self.remote_im_turn_route_order.remove(index);
+        }
+    }
+
+    pub(super) fn remote_im_route_for_turn(&self, turn_id: &str) -> Option<RemoteImTurnRoute> {
+        self.remote_im_turn_routes.get(turn_id).cloned()
+    }
+
+    pub(super) fn clear_active_remote_im_route_if_matches(&mut self, route: &RemoteImTurnRoute) {
+        if self.remote_im_active_reply_id.as_deref() == Some(route.reply_id.as_str())
+            && self.remote_im_active_task_id == route.task_id
+        {
+            self.remote_im_active_reply_id = None;
+            self.remote_im_active_task_id = None;
+        }
     }
 
     pub(super) fn submit_plain_user_message_with_remote_im_correlation(
@@ -42,7 +130,9 @@ impl ChatWidget {
         user_message: UserMessage,
     ) -> Option<AppCommand> {
         let reply_id = crate::multi_ai_code_im_bridge::remote_im_reply_id(&user_message.text);
-        self.set_remote_im_input_origin(reply_id.is_some());
+        let task_id = crate::multi_ai_code_im_bridge::remote_im_task_id(&user_message.text);
+        let source_routed = reply_id.is_some();
+        self.set_remote_im_input_origin(source_routed);
         let committed_echo = user_message_display_for_history(
             user_message.clone(),
             &UserMessageHistoryRecord::UserMessageText,
@@ -52,7 +142,7 @@ impl ChatWidget {
             UserMessageHistoryRecord::UserMessageText,
             ShellEscapePolicy::Disallow,
         );
-        self.remember_remote_im_reply(accepted, reply_id, None, committed_echo);
+        self.remember_remote_im_reply(accepted, reply_id, task_id, source_routed, committed_echo);
         command
     }
 
@@ -93,11 +183,14 @@ impl ChatWidget {
         );
         if accepted {
             self.set_remote_im_input_origin(remote_im_input);
-            if remote_im_input {
-                crate::multi_ai_code_im_bridge::send_source_task_started();
-            }
         }
-        self.remember_remote_im_reply(accepted, reply_id, task_id, committed_echo.clone());
+        self.remember_remote_im_reply(
+            accepted,
+            reply_id,
+            task_id,
+            remote_im_input,
+            committed_echo.clone(),
+        );
         if accepted && suppress_committed_echo {
             const MAX_PENDING_REMOTE_IM_ECHOES: usize = 32;
             if self.remote_im_pending_user_message_echoes.len() >= MAX_PENDING_REMOTE_IM_ECHOES {

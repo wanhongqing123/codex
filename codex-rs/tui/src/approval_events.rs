@@ -28,6 +28,11 @@ pub(crate) struct ExecApprovalRequestEvent {
     pub(crate) turn_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) environment_id: Option<String>,
+    /// Exact command text received from app-server. This must remain byte-for-byte
+    /// intact for remote human approval; `command` is only the normalized argv
+    /// used by the existing local approval UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) raw_command: Option<String>,
     pub(crate) command: Vec<String>,
     pub(crate) cwd: AbsolutePathBuf,
     pub(crate) reason: Option<String>,

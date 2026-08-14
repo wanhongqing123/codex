@@ -58,12 +58,22 @@ impl ChatWidget {
                 self.on_thread_settings_updated(notification);
             }
             ServerNotification::TurnStarted(notification) => {
-                self.turn_lifecycle.last_turn_id = Some(notification.turn.id);
+                let turn_id = notification.turn.id;
+                self.turn_lifecycle.last_turn_id = Some(turn_id.clone());
+                if !matches!(replay_kind, Some(ReplayKind::ResumeInitialMessages)) {
+                    self.bind_pending_remote_im_route_to_turn(&turn_id);
+                }
                 self.last_non_retry_error = None;
                 if !matches!(replay_kind, Some(ReplayKind::ResumeInitialMessages)) {
-                    if self.remote_im_forwarding_active {
-                        crate::multi_ai_code_im_bridge::send_source_task_activity();
-                    } else if let Some(task_id) = self.remote_im_active_task_id.as_deref() {
+                    let turn_route = self.remote_im_turn_routes.get(&turn_id);
+                    if turn_route.is_some_and(|route| route.source_routed) {
+                        crate::multi_ai_code_im_bridge::send_source_task_activity(
+                            turn_route.map(|route| route.reply_id.as_str()),
+                            turn_route.and_then(|route| route.task_id.as_deref()),
+                        );
+                    } else if let Some(task_id) =
+                        turn_route.and_then(|route| route.task_id.as_deref())
+                    {
                         crate::multi_ai_code_im_bridge::send_task_activity(task_id);
                     }
                     self.on_task_started();
@@ -136,17 +146,23 @@ impl ChatWidget {
                     }
                 } else {
                     if !from_replay {
-                        if self.remote_im_forwarding_active {
+                        let turn_route =
+                            self.remote_im_route_for_turn(notification.turn_id.as_str());
+                        if turn_route.as_ref().is_some_and(|route| route.source_routed) {
                             crate::multi_ai_code_im_bridge::send_source_turn_error(
                                 &notification.error.message,
                                 Some(notification.turn_id.as_str()),
+                                turn_route.as_ref().map(|route| route.reply_id.as_str()),
+                                turn_route
+                                    .as_ref()
+                                    .and_then(|route| route.task_id.as_deref()),
                             );
-                        } else if let Some(reply_id) = self.remote_im_active_reply_id.as_deref() {
+                        } else if let Some(route) = turn_route {
                             crate::multi_ai_code_im_bridge::send_turn_error(
                                 &notification.error.message,
                                 Some(notification.turn_id.as_str()),
-                                reply_id,
-                                self.remote_im_active_task_id.as_deref(),
+                                &route.reply_id,
+                                route.task_id.as_deref(),
                             );
                         }
                     }
@@ -257,27 +273,27 @@ impl ChatWidget {
         notification: TurnCompletedNotification,
         replay_kind: Option<ReplayKind>,
     ) {
+        let completed_turn_id = notification.turn.id.clone();
+        let terminal_status = !matches!(notification.turn.status, TurnStatus::InProgress);
         // User-message dedupe only suppresses the app-server echo of a prompt
         // this TUI already rendered locally. Once that turn ends, another
         // client can submit the same text and it still needs its own user cell.
         self.last_rendered_user_message_display = None;
         match notification.turn.status {
             TurnStatus::Completed => {
-                let source_routed = self.remote_im_forwarding_active;
+                let remote_im_route = self.remote_im_route_for_turn(notification.turn.id.as_str());
+                let source_routed = remote_im_route
+                    .as_ref()
+                    .is_some_and(|route| route.source_routed);
                 let active_goal_continuing = self
                     .current_goal_status
                     .as_ref()
                     .is_some_and(GoalStatusState::is_active);
-                let remote_im_reply_id = if source_routed || active_goal_continuing {
-                    self.remote_im_active_reply_id.clone()
-                } else {
-                    self.remote_im_active_reply_id.take()
-                };
-                let remote_im_task_id = if source_routed || active_goal_continuing {
-                    self.remote_im_active_task_id.clone()
-                } else {
-                    self.remote_im_active_task_id.take()
-                };
+                let remote_im_reply_id =
+                    remote_im_route.as_ref().map(|route| route.reply_id.clone());
+                let remote_im_task_id = remote_im_route
+                    .as_ref()
+                    .and_then(|route| route.task_id.clone());
                 let last_agent_message =
                     notification
                         .turn
@@ -315,11 +331,15 @@ impl ChatWidget {
                             crate::multi_ai_code_im_bridge::send_source_assistant_final(
                                 text,
                                 Some(id.as_str()),
+                                remote_im_reply_id.as_deref(),
+                                remote_im_task_id.as_deref(),
                             );
                         } else {
                             crate::multi_ai_code_im_bridge::send_source_turn_error(
                                 "Codex turn completed without a final assistant response.",
                                 Some(notification.turn.id.as_str()),
+                                remote_im_reply_id.as_deref(),
+                                remote_im_task_id.as_deref(),
                             );
                         }
                     } else if active_goal_continuing && remote_im_reply_id.is_some() {
@@ -356,28 +376,41 @@ impl ChatWidget {
                     notification.turn.duration_ms,
                     replay_kind.is_some(),
                 );
+                if !source_routed
+                    && !active_goal_continuing
+                    && let Some(route) = remote_im_route.as_ref()
+                {
+                    self.clear_active_remote_im_route_if_matches(route);
+                }
             }
             TurnStatus::Interrupted => {
-                if self.remote_im_forwarding_active {
+                let remote_im_route = self.remote_im_route_for_turn(notification.turn.id.as_str());
+                if remote_im_route
+                    .as_ref()
+                    .is_some_and(|route| route.source_routed)
+                {
                     if replay_kind.is_none() {
                         crate::multi_ai_code_im_bridge::send_source_turn_error(
                             "Codex turn was interrupted.",
                             Some(notification.turn.id.as_str()),
+                            remote_im_route
+                                .as_ref()
+                                .map(|route| route.reply_id.as_str()),
+                            remote_im_route
+                                .as_ref()
+                                .and_then(|route| route.task_id.as_deref()),
                         );
                     }
-                } else {
-                    let remote_im_reply_id = self.remote_im_active_reply_id.take();
-                    let remote_im_task_id = self.remote_im_active_task_id.take();
-                    if let Some(reply_id) = remote_im_reply_id.as_deref()
-                        && replay_kind.is_none()
-                    {
+                } else if let Some(route) = remote_im_route.as_ref() {
+                    if replay_kind.is_none() {
                         crate::multi_ai_code_im_bridge::send_turn_error(
                             "Codex turn was interrupted.",
                             Some(notification.turn.id.as_str()),
-                            reply_id,
-                            remote_im_task_id.as_deref(),
+                            &route.reply_id,
+                            route.task_id.as_deref(),
                         );
                     }
+                    self.clear_active_remote_im_route_if_matches(route);
                 }
                 self.last_non_retry_error = None;
                 let reason = if self
@@ -391,14 +424,17 @@ impl ChatWidget {
                 self.on_interrupted_turn(reason);
             }
             TurnStatus::Failed => {
-                let source_routed = self.remote_im_forwarding_active;
-                let remote_im_reply_id = (!source_routed)
-                    .then(|| self.remote_im_active_reply_id.take())
-                    .flatten();
-                let remote_im_task_id = (!source_routed)
-                    .then(|| self.remote_im_active_task_id.take())
-                    .flatten();
                 let turn_id = notification.turn.id.clone();
+                let remote_im_route = self.remote_im_route_for_turn(turn_id.as_str());
+                let source_routed = remote_im_route
+                    .as_ref()
+                    .is_some_and(|route| route.source_routed);
+                let remote_im_reply_id = remote_im_route
+                    .as_ref()
+                    .map(|route| route.reply_id.as_str());
+                let remote_im_task_id = remote_im_route
+                    .as_ref()
+                    .and_then(|route| route.task_id.as_deref());
                 if let Some(error) = notification.turn.error {
                     if self.last_non_retry_error.as_ref()
                         == Some(&(notification.turn.id.clone(), error.message.clone()))
@@ -410,13 +446,15 @@ impl ChatWidget {
                                 crate::multi_ai_code_im_bridge::send_source_turn_error(
                                     &error.message,
                                     Some(turn_id.as_str()),
+                                    remote_im_reply_id,
+                                    remote_im_task_id,
                                 );
-                            } else if let Some(reply_id) = remote_im_reply_id.as_deref() {
+                            } else if let Some(reply_id) = remote_im_reply_id {
                                 crate::multi_ai_code_im_bridge::send_turn_error(
                                     &error.message,
                                     Some(turn_id.as_str()),
                                     reply_id,
-                                    remote_im_task_id.as_deref(),
+                                    remote_im_task_id,
                                 );
                             }
                         }
@@ -428,13 +466,15 @@ impl ChatWidget {
                             crate::multi_ai_code_im_bridge::send_source_turn_error(
                                 "Codex turn failed without an error message.",
                                 Some(turn_id.as_str()),
+                                remote_im_reply_id,
+                                remote_im_task_id,
                             );
-                        } else if let Some(reply_id) = remote_im_reply_id.as_deref() {
+                        } else if let Some(reply_id) = remote_im_reply_id {
                             crate::multi_ai_code_im_bridge::send_turn_error(
                                 "Codex turn failed without an error message.",
                                 Some(turn_id.as_str()),
                                 reply_id,
-                                remote_im_task_id.as_deref(),
+                                remote_im_task_id,
                             );
                         }
                     }
@@ -443,8 +483,14 @@ impl ChatWidget {
                     self.request_redraw();
                     self.maybe_send_next_queued_input();
                 }
+                if !source_routed && let Some(route) = remote_im_route.as_ref() {
+                    self.clear_active_remote_im_route_if_matches(route);
+                }
             }
             TurnStatus::InProgress => {}
+        }
+        if terminal_status {
+            self.finish_remote_im_turn_route(&completed_turn_id);
         }
     }
 

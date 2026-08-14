@@ -733,6 +733,14 @@ async fn active_goal_turn_completion_keeps_remote_im_task_correlation() {
 async fn failed_turn_without_error_clears_remote_im_reply_correlation() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.remote_im_active_reply_id = Some("rim-failed-without-error".to_string());
+    chat.remember_remote_im_turn_route_if_absent(
+        "turn-1".to_string(),
+        RemoteImTurnRoute {
+            reply_id: "rim-failed-without-error".to_string(),
+            task_id: None,
+            source_routed: false,
+        },
+    );
 
     chat.handle_server_notification(
         ServerNotification::TurnCompleted(TurnCompletedNotification {

@@ -38,9 +38,12 @@ const GOAL_USAGE_HINT: &str = "Example: /goal improve benchmark coverage";
 const RAW_USAGE: &str = "Usage: /raw [on|off]";
 const USAGE_CHATGPT_LOGIN_REQUIRED: &str = "Sign in with ChatGPT to use /usage.";
 
-fn build_remote_im_btw_task(task: &str, reply_id: &str) -> String {
+fn build_remote_im_btw_task(task: &str, reply_id: &str, task_id: Option<&str>) -> String {
+    let task_marker = task_id
+        .map(|task_id| format!("\nTask marker: <remote-im-task id=\"{task_id}\">"))
+        .unwrap_or_default();
     format!(
-        "{task}\n\n[IM_REPLY] Put final Markdown for IM between these exact markers, each on its own line in your reply:\nOpening marker: <remote-im-reply id=\"{reply_id}\">\nClosing marker: </remote-im-reply id=\"{reply_id}\">\nText outside markers is ignored."
+        "{task}\n\n[IM_REPLY] Put final Markdown for IM between these exact markers, each on its own line in your reply:\nOpening marker: <remote-im-reply id=\"{reply_id}\">{task_marker}\nClosing marker: </remote-im-reply id=\"{reply_id}\">\nText outside markers is ignored."
     )
 }
 
@@ -142,6 +145,7 @@ impl ChatWidget {
         &mut self,
         task: String,
         reply_id: Option<String>,
+        task_id: Option<String>,
     ) -> Result<(), String> {
         let task = task.trim();
         if task.is_empty() {
@@ -157,7 +161,14 @@ impl ChatWidget {
         };
 
         let task = match reply_id.filter(|id| !id.trim().is_empty()) {
-            Some(reply_id) => build_remote_im_btw_task(task, reply_id.trim()),
+            Some(reply_id) => build_remote_im_btw_task(
+                task,
+                reply_id.trim(),
+                task_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty()),
+            ),
             None => task.to_string(),
         };
 

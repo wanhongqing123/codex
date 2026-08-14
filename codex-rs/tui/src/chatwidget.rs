@@ -85,6 +85,7 @@ use codex_app_server_protocol::AppSummary;
 use codex_app_server_protocol::CodexErrorInfo as AppServerCodexErrorInfo;
 use codex_app_server_protocol::CollabAgentTool;
 use codex_app_server_protocol::CollabAgentToolCallStatus;
+use codex_app_server_protocol::CommandExecutionApprovalDecision;
 use codex_app_server_protocol::CommandExecutionRequestApprovalParams;
 use codex_app_server_protocol::CommandExecutionSource as ExecCommandSource;
 use codex_app_server_protocol::CreditsSnapshot;
@@ -528,6 +529,31 @@ pub(crate) enum ExternalEditorState {
     Active,
 }
 
+#[derive(Clone, Debug)]
+struct RemoteImPendingExecApproval {
+    thread_id: ThreadId,
+    turn_id: String,
+    available_decisions: Vec<CommandExecutionApprovalDecision>,
+    reply_id: Option<String>,
+    task_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RemoteImTurnRoute {
+    reply_id: String,
+    task_id: Option<String>,
+    source_routed: bool,
+}
+
+#[derive(Clone, Debug)]
+struct PendingRemoteImReply {
+    committed_echo: UserMessageDisplay,
+    reply_id: String,
+    task_id: Option<String>,
+    source_routed: bool,
+    bound_turn_id: Option<String>,
+}
+
 /// Maintains the per-session UI state and interaction state machines for the chat screen.
 ///
 /// `ChatWidget` owns the state derived from the protocol event stream (history cells, streaming
@@ -592,10 +618,13 @@ pub(crate) struct ChatWidget {
     stream_controller: Option<StreamController>,
     remote_im_reply_display: crate::multi_ai_code_im_bridge::RemoteImReplyDisplayFilter,
     remote_im_pending_user_message_echoes: VecDeque<UserMessageDisplay>,
-    remote_im_pending_replies: VecDeque<(UserMessageDisplay, String, Option<String>)>,
+    remote_im_pending_replies: VecDeque<PendingRemoteImReply>,
     remote_im_forwarding_active: bool,
     remote_im_active_reply_id: Option<String>,
     remote_im_active_task_id: Option<String>,
+    remote_im_turn_routes: HashMap<String, RemoteImTurnRoute>,
+    remote_im_turn_route_order: VecDeque<String>,
+    remote_im_pending_exec_approvals: HashMap<String, RemoteImPendingExecApproval>,
     // Stream lifecycle controller for proposed plan output.
     plan_stream_controller: Option<PlanStreamController>,
     pending_stream_consolidations: usize,
@@ -884,13 +913,14 @@ fn exec_approval_request_from_params(
         .cwd
         .and_then(|cwd| cwd.to_inferred_abs_path())
         .unwrap_or_else(|| fallback_cwd.clone());
+    let raw_command = params.command.clone();
     ExecApprovalRequestEvent {
         call_id: params.item_id,
-        command: params
-            .command
+        command: raw_command
             .as_deref()
             .map(split_command_string)
             .unwrap_or_default(),
+        raw_command,
         cwd,
         reason: params.reason,
         network_approval_context: params.network_approval_context,
@@ -1303,12 +1333,37 @@ impl ChatWidget {
         if let Some(index) = self
             .remote_im_pending_replies
             .iter()
-            .position(|(pending, _, _)| pending == &display)
-            && let Some((_, reply_id, task_id)) = self.remote_im_pending_replies.remove(index)
+            .position(|pending| pending.committed_echo == display)
+            && let Some(pending) = self.remote_im_pending_replies.remove(index)
         {
+            let PendingRemoteImReply {
+                reply_id,
+                task_id,
+                source_routed,
+                bound_turn_id,
+                ..
+            } = pending;
             crate::multi_ai_code_im_bridge::send_task_started(&reply_id, task_id.as_deref());
-            self.remote_im_active_reply_id = Some(reply_id);
-            self.remote_im_active_task_id = task_id;
+            self.remote_im_active_reply_id = Some(reply_id.clone());
+            self.remote_im_active_task_id = task_id.clone();
+            // `TurnStarted` normally arrives before the committed user item and
+            // binds the front pending route. Keep this exact-message fallback so
+            // protocol ordering changes cannot leave a remote turn uncorrelated.
+            if let Some(turn_id) = bound_turn_id.or_else(|| {
+                self.turn_lifecycle
+                    .agent_turn_running
+                    .then(|| self.turn_lifecycle.last_turn_id.clone())
+                    .flatten()
+            }) {
+                self.remember_remote_im_turn_route_if_absent(
+                    turn_id,
+                    RemoteImTurnRoute {
+                        reply_id,
+                        task_id,
+                        source_routed,
+                    },
+                );
+            }
         }
 
         if let Some(index) = self

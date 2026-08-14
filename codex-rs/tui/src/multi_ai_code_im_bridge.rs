@@ -17,10 +17,12 @@ use std::time::Duration;
 use std::time::Instant;
 use url::Url;
 
+use codex_protocol::ThreadId;
 use codex_protocol::config_types::ModeKind;
 
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
+use crate::approval_events::ExecApprovalRequestEvent;
 
 #[derive(Clone, Debug)]
 struct BridgeConfig {
@@ -69,6 +71,19 @@ pub(crate) fn remote_im_reply_id(text: &str) -> Option<String> {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')))
         .then(|| reply_id.to_string())
+    })
+}
+
+pub(crate) fn remote_im_task_id(text: &str) -> Option<String> {
+    const PREFIX: &str = "Task marker: <remote-im-task id=\"";
+    text.lines().find_map(|line| {
+        let task_id = line.trim().strip_prefix(PREFIX)?.strip_suffix("\">")?;
+        (!task_id.is_empty()
+            && task_id.len() <= 160
+            && task_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')))
+        .then(|| task_id.to_string())
     })
 }
 
@@ -207,6 +222,13 @@ struct ControlPayload {
     reply_id: Option<String>,
     #[serde(rename = "taskId")]
     task_id: Option<String>,
+    #[serde(rename = "threadId")]
+    thread_id: Option<String>,
+    #[serde(rename = "turnId")]
+    turn_id: Option<String>,
+    #[serde(rename = "approvalId")]
+    approval_id: Option<String>,
+    decision: Option<String>,
     #[serde(rename = "requestId")]
     request_id: Option<String>,
 }
@@ -299,6 +321,7 @@ fn control_payload_to_app_event(payload: ControlPayload, token: &str) -> Option<
             request_id: payload.request_id?,
             task: payload.task.unwrap_or_default(),
             reply_id: payload.reply_id,
+            task_id: payload.task_id,
         }),
         "submit_user_message" => {
             let remote_im_input = match payload.input_origin.as_deref() {
@@ -336,6 +359,14 @@ fn control_payload_to_app_event(payload: ControlPayload, token: &str) -> Option<
         "clear" => Some(AppEvent::MultiAiCodeImClear {
             request_id: payload.request_id?,
         }),
+        "resolve_approval" => Some(AppEvent::MultiAiCodeImResolveApproval {
+            request_id: payload.request_id?,
+            thread_id: payload.thread_id?,
+            turn_id: payload.turn_id?,
+            task_id: payload.task_id?,
+            approval_id: payload.approval_id?,
+            decision: payload.decision?,
+        }),
         "theme" => {
             // bg 必填；fg 缺省时由 bg 的明暗推导（见 event_dispatch 处理）。
             let bg = parse_hex_rgb(payload.bg.as_deref()?)?;
@@ -368,26 +399,120 @@ pub(crate) fn send_input_origin(remote_im: bool) {
     );
 }
 
-pub(crate) fn send_source_task_started() {
-    send_reliable_text("task_started", "running", None, None, None);
+pub(crate) fn send_source_task_activity(reply_id: Option<&str>, task_id: Option<&str>) {
+    send_reliable_text("task_activity", "running", None, reply_id, task_id);
 }
 
-pub(crate) fn send_source_task_activity() {
-    send_reliable_text("task_activity", "running", None, None, None);
+pub(crate) fn send_source_assistant_text(
+    text: &str,
+    message_id: Option<&str>,
+    reply_id: Option<&str>,
+    task_id: Option<&str>,
+) {
+    send_reliable_text("assistant_text", text, message_id, reply_id, task_id);
 }
 
-pub(crate) fn send_source_assistant_text(text: &str, message_id: Option<&str>) {
-    send_reliable_text("assistant_text", text, message_id, None, None);
-}
-
-pub(crate) fn send_source_assistant_final(text: &str, message_id: Option<&str>) {
+pub(crate) fn send_source_assistant_final(
+    text: &str,
+    message_id: Option<&str>,
+    reply_id: Option<&str>,
+    task_id: Option<&str>,
+) {
     let message_id = message_id.map(|id| format!("{id}:final"));
-    send_reliable_text("assistant_final", text, message_id.as_deref(), None, None);
+    send_reliable_text(
+        "assistant_final",
+        text,
+        message_id.as_deref(),
+        reply_id,
+        task_id,
+    );
 }
 
-pub(crate) fn send_source_turn_error(text: &str, turn_id: Option<&str>) {
+pub(crate) fn send_source_turn_error(
+    text: &str,
+    turn_id: Option<&str>,
+    reply_id: Option<&str>,
+    task_id: Option<&str>,
+) {
     let message_id = turn_id.map(|id| format!("{id}:error"));
-    send_reliable_text("turn_error", text, message_id.as_deref(), None, None);
+    send_reliable_text("turn_error", text, message_id.as_deref(), reply_id, task_id);
+}
+
+pub(crate) fn send_approval_request(
+    thread_id: ThreadId,
+    request: &ExecApprovalRequestEvent,
+    reply_id: Option<&str>,
+    task_id: Option<&str>,
+) -> ReliableSendOutcome {
+    let approval_id = request.effective_approval_id();
+    let payload = approval_request_payload(thread_id, request, reply_id, task_id);
+    send_security_reliable_payload(
+        payload,
+        format!("codex-approval-request:{thread_id}:{approval_id}"),
+    )
+}
+
+fn approval_request_payload(
+    thread_id: ThreadId,
+    request: &ExecApprovalRequestEvent,
+    reply_id: Option<&str>,
+    task_id: Option<&str>,
+) -> serde_json::Value {
+    let approval_id = request.effective_approval_id();
+    let command_text = request.raw_command.clone().unwrap_or_else(|| {
+        shlex::try_join(request.command.iter().map(String::as_str))
+            .unwrap_or_else(|_| request.command.join(" "))
+    });
+    let mut payload = json!({
+        "kind": "approval_request",
+        "approvalType": "command_execution",
+        // Keep a text display value for host versions whose structured-output
+        // ingress still requires text, while retaining the argv below for newer
+        // clients that can render it without reparsing.
+        "text": command_text,
+        "approvalId": approval_id,
+        "itemId": request.call_id,
+        "threadId": thread_id.to_string(),
+        "turnId": request.turn_id,
+        "command": request.command,
+        "cwd": request.cwd.display().to_string(),
+        "reason": request.reason,
+        "availableDecisions": request.effective_available_decisions(),
+    });
+    if let Some(reply_id) = reply_id {
+        payload["replyId"] = reply_id.into();
+    }
+    if let Some(task_id) = task_id {
+        payload["taskId"] = task_id.into();
+    }
+    payload
+}
+
+pub(crate) fn send_approval_resolved(
+    thread_id: ThreadId,
+    turn_id: &str,
+    approval_id: &str,
+    reply_id: Option<&str>,
+    task_id: Option<&str>,
+) {
+    let mut payload = json!({
+        "kind": "approval_resolved",
+        "approvalType": "command_execution",
+        "text": "resolved",
+        "approvalId": approval_id,
+        "threadId": thread_id.to_string(),
+        "turnId": turn_id,
+    });
+    if let Some(reply_id) = reply_id {
+        payload["replyId"] = reply_id.into();
+    }
+    if let Some(task_id) = task_id {
+        payload["taskId"] = task_id.into();
+    }
+    send_reliable_payload(
+        payload,
+        format!("codex-approval-resolved:{thread_id}:{approval_id}"),
+    );
 }
 
 pub(crate) fn send_assistant_text(text: &str, message_id: Option<&str>, task_id: Option<&str>) {
@@ -436,20 +561,82 @@ fn send_reliable_text(
     if text.is_empty() {
         return;
     }
-    let Some(sender) = data_sender() else {
-        return;
-    };
     let message_id = message_id
         .filter(|id| !id.is_empty())
         .map(str::to_string)
         .unwrap_or_else(next_message_id);
-    let _ = sender.send(DataMsg::ReliableText {
-        kind,
-        text: text.to_string(),
-        message_id,
-        reply_id: reply_id.map(str::to_string),
-        task_id: task_id.map(str::to_string),
+    let mut payload = json!({
+        "kind": kind,
+        "text": text,
     });
+    if let Some(reply_id) = reply_id {
+        payload["replyId"] = reply_id.into();
+    }
+    if let Some(task_id) = task_id {
+        payload["taskId"] = task_id.into();
+    }
+    send_reliable_payload(payload, message_id);
+}
+
+fn send_reliable_payload(payload: serde_json::Value, message_id: String) {
+    let Some(sender) = data_sender() else {
+        return;
+    };
+    let _ = sender.send(DataMsg::Reliable {
+        priority: reliable_payload_priority(&payload),
+        payload,
+        message_id,
+        admission: None,
+    });
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReliableSendOutcome {
+    Queued,
+    Unavailable,
+    Saturated,
+}
+
+fn send_security_reliable_payload(
+    payload: serde_json::Value,
+    message_id: String,
+) -> ReliableSendOutcome {
+    let Some(sender) = data_sender() else {
+        return ReliableSendOutcome::Unavailable;
+    };
+    let (admission_tx, admission_rx) = mpsc::sync_channel(1);
+    if sender
+        .send(DataMsg::Reliable {
+            priority: ReliablePriority::SecurityApproval,
+            payload,
+            message_id,
+            admission: Some(admission_tx),
+        })
+        .is_err()
+    {
+        return ReliableSendOutcome::Unavailable;
+    }
+    match admission_rx.recv_timeout(std::time::Duration::from_secs(1)) {
+        Ok(true) => ReliableSendOutcome::Queued,
+        Ok(false) => ReliableSendOutcome::Saturated,
+        // The manager may be delayed behind a large channel backlog. Treat a
+        // timed-out admission as rejected; the receiver is dropped, so the
+        // manager will later observe send(true) failure and must not deliver it.
+        Err(_) => ReliableSendOutcome::Saturated,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReliablePriority {
+    Normal,
+    SecurityApproval,
+}
+
+fn reliable_payload_priority(payload: &serde_json::Value) -> ReliablePriority {
+    match payload.get("kind").and_then(serde_json::Value::as_str) {
+        Some("approval_request" | "approval_resolved") => ReliablePriority::SecurityApproval,
+        _ => ReliablePriority::Normal,
+    }
 }
 
 pub(crate) fn send_control_result(request_id: &str, ok: bool, text: &str, error: Option<&str>) {
@@ -482,12 +669,11 @@ fn next_message_id() -> String {
 }
 
 enum DataMsg {
-    ReliableText {
-        kind: &'static str,
-        text: String,
+    Reliable {
+        payload: serde_json::Value,
         message_id: String,
-        reply_id: Option<String>,
-        task_id: Option<String>,
+        priority: ReliablePriority,
+        admission: Option<mpsc::SyncSender<bool>>,
     },
     ControlResult {
         line: String,
@@ -501,10 +687,42 @@ enum DataMsg {
     },
 }
 
-struct PendingReliableText {
+struct PendingReliableMessage {
     message_id: String,
     line: String,
     sent_at: Instant,
+    priority: ReliablePriority,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReliableAdmission {
+    Append,
+    ReplaceNormal(usize),
+    Reject,
+}
+
+fn reliable_message_admission(
+    pending: &VecDeque<PendingReliableMessage>,
+    incoming: ReliablePriority,
+) -> ReliableAdmission {
+    if pending.len() < MAX_PENDING {
+        return ReliableAdmission::Append;
+    }
+    if let Some(index) = pending
+        .iter()
+        .position(|item| item.priority == ReliablePriority::Normal)
+    {
+        return ReliableAdmission::ReplaceNormal(index);
+    }
+    // Never silently evict a security approval with another event. If every
+    // slot is already security-critical, retain the existing requests and make
+    // the saturation explicit. The caller logs the refused incoming event.
+    let _ = incoming;
+    ReliableAdmission::Reject
+}
+
+fn confirm_reliable_admission(admission: Option<mpsc::SyncSender<bool>>, accepted: bool) -> bool {
+    admission.is_none_or(|admission| admission.send(accepted).is_ok())
 }
 
 #[derive(Deserialize)]
@@ -537,37 +755,44 @@ fn data_sender() -> Option<&'static mpsc::Sender<DataMsg>> {
 fn run_data_manager(config: BridgeConfig, rx: mpsc::Receiver<DataMsg>, tx: mpsc::Sender<DataMsg>) {
     let mut stream: Option<TcpStream> = None;
     let mut generation: u64 = 0;
-    let mut pending: VecDeque<PendingReliableText> = VecDeque::new();
+    let mut pending: VecDeque<PendingReliableMessage> = VecDeque::new();
 
     loop {
         match rx.recv_timeout(WATCHDOG_TICK) {
-            Ok(DataMsg::ReliableText {
-                kind,
-                text,
+            Ok(DataMsg::Reliable {
+                mut payload,
                 message_id,
-                reply_id,
-                task_id,
+                priority,
+                admission,
             }) => {
-                let mut payload = json!({
-                    "token": config.token,
-                    "kind": kind,
-                    "text": text,
-                    "messageId": message_id.clone(),
-                });
-                if let Some(reply_id) = reply_id {
-                    payload["replyId"] = reply_id.into();
-                }
-                if let Some(task_id) = task_id {
-                    payload["taskId"] = task_id.into();
-                }
+                payload["token"] = config.token.clone().into();
+                payload["messageId"] = message_id.clone().into();
                 let line = format!("{payload}\n");
-                if pending.len() >= MAX_PENDING {
-                    pending.pop_front();
+                let admission_plan = reliable_message_admission(&pending, priority);
+                if admission_plan == ReliableAdmission::Reject {
+                    tracing::error!(
+                        %message_id,
+                        ?priority,
+                        "remote IM reliable queue is saturated with security approvals; refusing to evict an approval event"
+                    );
+                    confirm_reliable_admission(admission, /*accepted*/ false);
+                    continue;
                 }
-                pending.push_back(PendingReliableText {
+                // Confirm synchronous security admission before mutating the
+                // queue or writing to the host. If the caller timed out and
+                // already canceled fail-closed, this send fails and prevents a
+                // stale approval notification from being delivered later.
+                if !confirm_reliable_admission(admission, /*accepted*/ true) {
+                    continue;
+                }
+                if let ReliableAdmission::ReplaceNormal(index) = admission_plan {
+                    pending.remove(index);
+                }
+                pending.push_back(PendingReliableMessage {
                     message_id,
                     line: line.clone(),
                     sent_at: Instant::now(),
+                    priority,
                 });
                 write_line(&config, &mut stream, &mut generation, &tx, &line);
             }
@@ -702,6 +927,10 @@ mod tests {
             fg: None,
             reply_id: None,
             task_id: None,
+            thread_id: None,
+            turn_id: None,
+            approval_id: None,
+            decision: None,
             request_id: Some("req-1".to_string()),
         }
     }
@@ -727,10 +956,157 @@ mod tests {
     }
 
     #[test]
+    fn resolve_approval_control_preserves_security_identity() {
+        for decision_value in ["accept", "cancel", "invalid"] {
+            let mut payload = control_payload("resolve_approval");
+            payload.thread_id = Some("00000000-0000-0000-0000-000000000123".to_string());
+            payload.turn_id = Some("turn-1".to_string());
+            payload.task_id = Some("task-1".to_string());
+            payload.approval_id = Some("approval-1".to_string());
+            payload.decision = Some(decision_value.to_string());
+
+            let event = control_payload_to_app_event(payload, "token")
+                .expect("well-formed approval response should reach app-level validation");
+
+            assert!(matches!(
+                event,
+                AppEvent::MultiAiCodeImResolveApproval {
+                    request_id,
+                    thread_id,
+                    turn_id,
+                    task_id,
+                    approval_id,
+                    decision,
+                } if request_id == "req-1"
+                    && thread_id == "00000000-0000-0000-0000-000000000123"
+                    && turn_id == "turn-1"
+                    && task_id == "task-1"
+                    && approval_id == "approval-1"
+                    && decision == decision_value
+            ));
+        }
+
+        for missing in ["thread", "turn", "task", "approval", "decision"] {
+            let mut payload = control_payload("resolve_approval");
+            payload.thread_id =
+                (missing != "thread").then(|| "00000000-0000-0000-0000-000000000123".to_string());
+            payload.turn_id = (missing != "turn").then(|| "turn-1".to_string());
+            payload.task_id = (missing != "task").then(|| "task-1".to_string());
+            payload.approval_id = (missing != "approval").then(|| "approval-1".to_string());
+            payload.decision = (missing != "decision").then(|| "accept".to_string());
+            assert!(
+                control_payload_to_app_event(payload, "token").is_none(),
+                "missing {missing} must not produce an approval response"
+            );
+        }
+    }
+
+    #[test]
+    fn approval_request_payload_is_structured_and_explicitly_task_routed() {
+        let thread_id = ThreadId::new();
+        let request = ExecApprovalRequestEvent {
+            call_id: "item-1".to_string(),
+            approval_id: Some("approval-1".to_string()),
+            turn_id: "turn-1".to_string(),
+            environment_id: None,
+            raw_command: Some(
+                "powershell  -Command  \"Remove-Item -Recurse -Force 'C:\\\\tmp\\\\target file'\""
+                    .to_string(),
+            ),
+            command: vec![
+                "powershell".to_string(),
+                "-Command".to_string(),
+                "Remove-Item -Recurse -Force C:\\tmp\\target".to_string(),
+            ],
+            cwd: codex_utils_absolute_path::AbsolutePathBuf::current_dir()
+                .expect("current directory"),
+            reason: Some("dangerous command".to_string()),
+            proposed_execpolicy_amendment: None,
+            proposed_network_policy_amendments: None,
+            available_decisions: Some(vec![
+                codex_app_server_protocol::CommandExecutionApprovalDecision::Accept,
+                codex_app_server_protocol::CommandExecutionApprovalDecision::Cancel,
+            ]),
+            network_approval_context: None,
+            additional_permissions: None,
+        };
+
+        let payload =
+            approval_request_payload(thread_id, &request, Some("reply-1"), Some("task-1"));
+
+        assert_eq!(payload["kind"], "approval_request");
+        assert_eq!(payload["approvalId"], "approval-1");
+        assert_eq!(payload["itemId"], "item-1");
+        assert_eq!(payload["threadId"], thread_id.to_string());
+        assert_eq!(payload["turnId"], "turn-1");
+        assert_eq!(payload["replyId"], "reply-1");
+        assert_eq!(payload["taskId"], "task-1");
+        assert_eq!(
+            payload["text"],
+            "powershell  -Command  \"Remove-Item -Recurse -Force 'C:\\\\tmp\\\\target file'\""
+        );
+        assert_eq!(payload["availableDecisions"], json!(["accept", "cancel"]));
+        assert!(
+            payload["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("Remove-Item"))
+        );
+        assert_eq!(payload["command"], json!(request.command));
+    }
+
+    fn pending_message(priority: ReliablePriority, index: usize) -> PendingReliableMessage {
+        PendingReliableMessage {
+            message_id: format!("message-{index}"),
+            line: format!("line-{index}"),
+            sent_at: Instant::now(),
+            priority,
+        }
+    }
+
+    #[test]
+    fn security_approval_replaces_normal_output_but_never_another_approval() {
+        let mut normal_queue = (0..MAX_PENDING)
+            .map(|index| pending_message(ReliablePriority::Normal, index))
+            .collect::<VecDeque<_>>();
+        assert!(matches!(
+            reliable_message_admission(&normal_queue, ReliablePriority::SecurityApproval),
+            ReliableAdmission::ReplaceNormal(0)
+        ));
+        normal_queue[0].priority = ReliablePriority::SecurityApproval;
+        assert!(matches!(
+            reliable_message_admission(&normal_queue, ReliablePriority::SecurityApproval),
+            ReliableAdmission::ReplaceNormal(1)
+        ));
+
+        let approval_queue = (0..MAX_PENDING)
+            .map(|index| pending_message(ReliablePriority::SecurityApproval, index))
+            .collect::<VecDeque<_>>();
+        assert_eq!(
+            reliable_message_admission(&approval_queue, ReliablePriority::SecurityApproval),
+            ReliableAdmission::Reject
+        );
+        assert_eq!(
+            reliable_message_admission(&approval_queue, ReliablePriority::Normal),
+            ReliableAdmission::Reject
+        );
+    }
+
+    #[test]
+    fn dropped_security_admission_prevents_late_delivery() {
+        let (admission_tx, admission_rx) = mpsc::sync_channel(1);
+        drop(admission_rx);
+        assert!(!confirm_reliable_admission(
+            Some(admission_tx),
+            /*accepted*/ true
+        ));
+    }
+
+    #[test]
     fn btw_control_payload_preserves_reply_id() {
         let mut payload = control_payload("btw");
         payload.task = Some("检查日志".to_string());
         payload.reply_id = Some("reply-btw-fixed".to_string());
+        payload.task_id = Some("task-btw-fixed".to_string());
 
         let event = control_payload_to_app_event(payload, "token")
             .expect("expected /btw control payload to map to app event");
@@ -740,11 +1116,26 @@ mod tests {
             AppEvent::MultiAiCodeImBtw {
                 request_id,
                 task,
-                reply_id
+                reply_id,
+                task_id
             } if request_id == "req-1"
                 && task == "检查日志"
                 && reply_id.as_deref() == Some("reply-btw-fixed")
+                && task_id.as_deref() == Some("task-btw-fixed")
         ));
+    }
+
+    #[test]
+    fn parses_remote_im_side_task_id_without_accepting_unsafe_marker_text() {
+        assert_eq!(
+            remote_im_task_id("Task marker: <remote-im-task id=\"remote-im-task-0123_abcd\">")
+                .as_deref(),
+            Some("remote-im-task-0123_abcd")
+        );
+        assert_eq!(
+            remote_im_task_id("Task marker: <remote-im-task id=\"task with spaces\">"),
+            None
+        );
     }
 
     #[test]

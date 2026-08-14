@@ -330,16 +330,21 @@ impl ChatWidget {
             }
         }
         if !from_replay && matches!(item.phase, Some(MessagePhase::Commentary)) {
-            if self.remote_im_forwarding_active {
+            let turn_route = self.remote_im_route_for_turn(turn_id);
+            if turn_route.as_ref().is_some_and(|route| route.source_routed) {
                 crate::multi_ai_code_im_bridge::send_source_assistant_text(
                     &message,
                     Some(item.id.as_str()),
+                    turn_route.as_ref().map(|route| route.reply_id.as_str()),
+                    turn_route
+                        .as_ref()
+                        .and_then(|route| route.task_id.as_deref()),
                 );
-            } else if self.remote_im_active_task_id.is_some() {
+            } else if let Some(route) = turn_route {
                 crate::multi_ai_code_im_bridge::send_assistant_text(
                     &message,
                     Some(item.id.as_str()),
-                    self.remote_im_active_task_id.as_deref(),
+                    route.task_id.as_deref(),
                 );
             }
         }

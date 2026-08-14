@@ -344,6 +344,7 @@ pub(crate) enum AppEvent {
         request_id: String,
         task: String,
         reply_id: Option<String>,
+        task_id: Option<String>,
     },
 
     /// Submit a normal user message from the Multi-AI Code IM control channel.
@@ -370,6 +371,18 @@ pub(crate) enum AppEvent {
     /// Clear the active Codex thread and start a fresh session from the Multi-AI Code IM control channel.
     MultiAiCodeImClear {
         request_id: String,
+    },
+
+    /// Resolve a pending command-execution approval from the Multi-AI Code IM channel.
+    /// The string fields are validated on the app thread so malformed or stale remote
+    /// responses receive an explicit `control_result` instead of silently timing out.
+    MultiAiCodeImResolveApproval {
+        request_id: String,
+        thread_id: String,
+        turn_id: String,
+        task_id: String,
+        approval_id: String,
+        decision: String,
     },
 
     /// Update the terminal default fg/bg (light/dark) at runtime from the host,

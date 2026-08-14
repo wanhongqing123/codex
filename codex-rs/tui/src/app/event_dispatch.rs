@@ -6,6 +6,7 @@
 use super::resize_reflow::trailing_run_start;
 use super::session_lifecycle::ThreadAttachPresentation;
 use super::*;
+use crate::app::app_server_requests::ResolvedAppServerRequest;
 use crate::app_server_session::ForkGoalContinuation;
 use crate::config_update::format_config_error;
 use crate::external_agent_config_migration::flow::ExternalAgentConfigMigrationFlowOutcome;
@@ -240,8 +241,12 @@ impl App {
                 request_id,
                 task,
                 reply_id,
+                task_id,
             } => {
-                match self.chat_widget.submit_btw_from_remote_im(task, reply_id) {
+                match self
+                    .chat_widget
+                    .submit_btw_from_remote_im(task, reply_id, task_id)
+                {
                     Ok(()) => {
                         crate::multi_ai_code_im_bridge::send_control_result(
                             &request_id,
@@ -355,6 +360,83 @@ impl App {
                     );
                     tui.frame_requester().schedule_frame();
                 }
+            }
+            AppEvent::MultiAiCodeImResolveApproval {
+                request_id,
+                thread_id,
+                turn_id,
+                task_id,
+                approval_id,
+                decision,
+            } => {
+                let parsed_thread_id = ThreadId::from_string(&thread_id)
+                    .map_err(|err| format!("invalid Codex thread id: {err}"));
+                let parsed_decision = match decision.as_str() {
+                    "accept" => {
+                        Ok(codex_app_server_protocol::CommandExecutionApprovalDecision::Accept)
+                    }
+                    "cancel" => {
+                        Ok(codex_app_server_protocol::CommandExecutionApprovalDecision::Cancel)
+                    }
+                    _ => Err("unsupported approval decision".to_string()),
+                };
+
+                let result = match (parsed_thread_id, parsed_decision) {
+                    (Ok(thread_id), Ok(decision)) => {
+                        if let Err(message) = self.chat_widget.validate_remote_im_exec_approval(
+                            thread_id,
+                            &turn_id,
+                            &task_id,
+                            &approval_id,
+                            &decision,
+                        ) {
+                            Err(message)
+                        } else if !self
+                            .pending_app_server_requests
+                            .has_exec_approval(&approval_id)
+                        {
+                            Err("approval is no longer pending".to_string())
+                        } else {
+                            let op = AppCommand::exec_approval(
+                                approval_id.clone(),
+                                Some(turn_id.clone()),
+                                decision,
+                            );
+                            match self
+                                .try_resolve_app_server_request(app_server, thread_id, &op)
+                                .await
+                            {
+                                Ok(true) => {
+                                    let resolved = ResolvedAppServerRequest::ExecApproval {
+                                        id: approval_id.clone(),
+                                    };
+                                    self.chat_widget.dismiss_app_server_request(&resolved);
+                                    self.chat_widget
+                                        .note_remote_im_exec_approval_resolved(&approval_id);
+                                    Ok(())
+                                }
+                                Ok(false) => Err("approval is no longer pending".to_string()),
+                                Err(err) => Err(format!("failed to resolve approval: {err}")),
+                            }
+                        }
+                    }
+                    (Err(message), _) | (_, Err(message)) => Err(message),
+                };
+                match result {
+                    Ok(()) => crate::multi_ai_code_im_bridge::send_control_result(
+                        &request_id,
+                        true,
+                        "approval resolved",
+                        None,
+                    ),
+                    Err(message) => crate::multi_ai_code_im_bridge::send_control_result(
+                        &request_id,
+                        false,
+                        "",
+                        Some(&message),
+                    ),
+                }
+                tui.frame_requester().schedule_frame();
             }
             AppEvent::MultiAiCodeImTheme { request_id, bg, fg } => {
                 // 运行时更新终端默认前景/背景色（明暗判定读的就是这个），再请求重绘，

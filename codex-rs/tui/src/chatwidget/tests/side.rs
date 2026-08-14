@@ -255,6 +255,7 @@ async fn remote_im_btw_side_turn_activates_source_reply_correlation() {
         "检查最近一次失败日志\n\n",
         "[IM_REPLY] Put final Markdown for IM between these exact markers, each on its own line in your reply:\n",
         "Opening marker: <remote-im-reply id=\"reply-btw-fixed\">\n",
+        "Task marker: <remote-im-task id=\"task-btw-fixed\">\n",
         "Closing marker: </remote-im-reply id=\"reply-btw-fixed\">\n",
         "Text outside markers is ignored."
     );
@@ -266,6 +267,10 @@ async fn remote_im_btw_side_turn_activates_source_reply_correlation() {
     assert_eq!(
         chat.remote_im_active_reply_id.as_deref(),
         Some("reply-btw-fixed")
+    );
+    assert_eq!(
+        chat.remote_im_active_task_id.as_deref(),
+        Some("task-btw-fixed")
     );
     assert!(chat.remote_im_pending_replies.is_empty());
 }
@@ -417,6 +422,7 @@ async fn remote_im_btw_wraps_task_with_reply_markers() {
     chat.submit_btw_from_remote_im(
         "检查最近一次失败日志".to_string(),
         Some("reply-btw-fixed".to_string()),
+        Some("task-btw-fixed".to_string()),
     )
     .expect("remote IM /btw should start a side task");
 
@@ -437,6 +443,11 @@ async fn remote_im_btw_wraps_task_with_reply_markers() {
                 user_message
                     .text
                     .contains("</remote-im-reply id=\"reply-btw-fixed\">")
+            );
+            assert!(
+                user_message
+                    .text
+                    .contains("<remote-im-task id=\"task-btw-fixed\">")
             );
         }
         other => panic!("expected StartSide with wrapped remote IM /btw task, got {other:?}"),
