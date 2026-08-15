@@ -18,6 +18,24 @@ impl ChatWidget {
         self.remote_im_forwarding_active = remote_im;
         crate::multi_ai_code_im_bridge::send_input_origin(remote_im);
         if !remote_im {
+            // A host route is registered before the control socket accepts the
+            // prompt. If local input wins before TurnStarted binds that route,
+            // there will never be a real turn terminal to release the host's
+            // admission lock. Emit an explicit terminal only for those still-
+            // unbound routes; bound routes keep their tombstone until the real
+            // turn terminal so another remote sender cannot steer that turn.
+            for pending in self
+                .remote_im_pending_replies
+                .iter()
+                .filter(|pending| pending.bound_turn_id.is_none())
+            {
+                crate::multi_ai_code_im_bridge::send_source_turn_error(
+                    "Remote IM input was superseded by local input before the turn started.",
+                    None,
+                    Some(pending.reply_id.as_str()),
+                    pending.task_id.as_deref(),
+                );
+            }
             self.remote_im_active_reply_id = None;
             self.remote_im_active_task_id = None;
             self.remote_im_pending_replies.clear();
@@ -157,6 +175,13 @@ impl ChatWidget {
     ) -> Result<(), String> {
         if text.trim().is_empty() {
             return Err("IM message is empty".to_string());
+        }
+        if remote_im_input
+            && (self.turn_lifecycle.agent_turn_running || self.input_queue.user_turn_pending_start)
+        {
+            return Err(
+                "Codex is already processing a local or previously submitted turn".to_string(),
+            );
         }
         let reply_id =
             reply_id.or_else(|| crate::multi_ai_code_im_bridge::remote_im_reply_id(&text));

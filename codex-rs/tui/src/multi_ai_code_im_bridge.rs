@@ -418,6 +418,10 @@ pub(crate) fn send_source_assistant_final(
     reply_id: Option<&str>,
     task_id: Option<&str>,
 ) {
+    if let Some(error) = empty_assistant_final_error(text) {
+        send_source_turn_error(error, message_id, reply_id, task_id);
+        return;
+    }
     let message_id = message_id.map(|id| format!("{id}:final"));
     send_reliable_text(
         "assistant_final",
@@ -525,6 +529,10 @@ pub(crate) fn send_assistant_final(
     reply_id: &str,
     task_id: Option<&str>,
 ) {
+    if let Some(error) = empty_assistant_final_error(text) {
+        send_turn_error(error, message_id, reply_id, task_id);
+        return;
+    }
     let message_id = message_id.map(|id| format!("{id}:final"));
     send_reliable_text(
         "assistant_final",
@@ -533,6 +541,12 @@ pub(crate) fn send_assistant_final(
         Some(reply_id),
         task_id,
     );
+}
+
+fn empty_assistant_final_error(text: &str) -> Option<&'static str> {
+    text.trim()
+        .is_empty()
+        .then_some("Codex turn completed without a final assistant response.")
 }
 
 pub(crate) fn send_turn_error(
@@ -1176,6 +1190,15 @@ mod tests {
                 && reply_id.as_deref() == Some("rim-fixed")
                 && task_id.as_deref() == Some("task-fixed")
         ));
+    }
+
+    #[test]
+    fn empty_assistant_final_is_classified_as_a_terminal_error() {
+        assert_eq!(
+            empty_assistant_final_error(" \n\t"),
+            Some("Codex turn completed without a final assistant response.")
+        );
+        assert_eq!(empty_assistant_final_error("completed"), None);
     }
 
     #[test]

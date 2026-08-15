@@ -255,6 +255,53 @@ async fn remote_im_forwarding_stays_active_until_direct_tui_input() {
 }
 
 #[tokio::test]
+async fn direct_tui_input_consumes_an_unbound_remote_route() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    assert_eq!(
+        chat.submit_user_message_from_remote_im(
+            "[来自远程 IM：phone]\n待处理".to_string(),
+            "[来自远程 IM：phone]\n待处理".to_string(),
+            Vec::new(),
+            true,
+            Some("rim-pending-local-takeover".to_string()),
+            Some("task-pending-local-takeover".to_string()),
+        ),
+        Ok(())
+    );
+    assert_eq!(chat.remote_im_pending_replies.len(), 1);
+    assert!(chat.remote_im_pending_replies[0].bound_turn_id.is_none());
+
+    chat.submit_user_message(UserMessage::from("本地用户接管"));
+
+    assert!(!chat.remote_im_forwarding_active);
+    assert!(chat.remote_im_pending_replies.is_empty());
+    assert!(chat.remote_im_active_reply_id.is_none());
+    assert!(chat.remote_im_active_task_id.is_none());
+}
+
+#[tokio::test]
+async fn remote_im_submission_does_not_steer_an_active_local_turn() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.on_task_started();
+
+    assert_eq!(
+        chat.submit_user_message_from_remote_im(
+            "[来自远程 IM：peer]\n不要混入本地任务".to_string(),
+            "[来自远程 IM：peer]\n不要混入本地任务".to_string(),
+            Vec::new(),
+            true,
+            Some("rim-local-busy".to_string()),
+            Some("task-local-busy".to_string()),
+        ),
+        Err("Codex is already processing a local or previously submitted turn".to_string())
+    );
+    assert!(chat.remote_im_pending_replies.is_empty());
+    assert!(chat.input_queue.pending_steers.is_empty());
+    assert_no_submit_op(&mut op_rx);
+}
+
+#[tokio::test]
 async fn remote_im_submission_does_not_render_committed_model_prompt_echo() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let rollout_file = NamedTempFile::new().unwrap();
