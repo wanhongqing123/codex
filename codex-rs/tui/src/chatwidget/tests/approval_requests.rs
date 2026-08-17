@@ -379,6 +379,12 @@ async fn remote_im_exec_approval_requires_task_identity_and_validates_decision()
     let thread_id = ThreadId::new();
     chat.thread_id = Some(thread_id);
     chat.remote_im_forwarding_active = true;
+    let persistent_decision =
+        codex_app_server_protocol::CommandExecutionApprovalDecision::AcceptWithExecpolicyAmendment {
+            execpolicy_amendment: codex_app_server_protocol::ExecPolicyAmendment {
+                command: vec!["Remove-Item".into(), "-Force".into()],
+            },
+        };
     let display = |message: &str| UserMessageDisplay {
         message: message.to_string(),
         remote_image_urls: Vec::new(),
@@ -439,14 +445,26 @@ async fn remote_im_exec_approval_requires_task_identity_and_validates_decision()
             cwd: AbsolutePathBuf::current_dir().expect("current dir"),
             reason: Some("dangerous command".into()),
             network_approval_context: None,
-            proposed_execpolicy_amendment: None,
+            proposed_execpolicy_amendment: Some(codex_app_server_protocol::ExecPolicyAmendment {
+                command: vec!["Remove-Item".into(), "-Force".into()],
+            }),
             proposed_network_policy_amendments: None,
             additional_permissions: None,
             available_decisions: Some(vec![
                 codex_app_server_protocol::CommandExecutionApprovalDecision::Accept,
+                persistent_decision.clone(),
                 codex_app_server_protocol::CommandExecutionApprovalDecision::Cancel,
             ]),
         },
+    );
+
+    assert_eq!(
+        chat.remote_im_exec_approval_decision("approval-1", "accept-persistent"),
+        Ok(persistent_decision.clone())
+    );
+    assert_eq!(
+        chat.remote_im_exec_approval_decision("approval-1", "unsupported"),
+        Err("approval decision is not available for this request".to_string())
     );
 
     assert_eq!(
@@ -456,6 +474,16 @@ async fn remote_im_exec_approval_requires_task_identity_and_validates_decision()
             "task-a",
             "approval-1",
             &codex_app_server_protocol::CommandExecutionApprovalDecision::Accept,
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        chat.validate_remote_im_exec_approval(
+            thread_id,
+            "turn-1",
+            "task-a",
+            "approval-1",
+            &persistent_decision,
         ),
         Ok(())
     );

@@ -470,6 +470,16 @@ fn approval_request_payload(
     task_id: Option<&str>,
 ) -> serde_json::Value {
     let approval_id = request.effective_approval_id();
+    let available_decisions = request.effective_available_decisions();
+    let persistent_approval_command = available_decisions.iter().find_map(|decision| {
+        let codex_app_server_protocol::CommandExecutionApprovalDecision::AcceptWithExecpolicyAmendment {
+            execpolicy_amendment,
+        } = decision
+        else {
+            return None;
+        };
+        Some(execpolicy_amendment.command.join(" "))
+    });
     let command_text = request.raw_command.clone().unwrap_or_else(|| {
         shlex::try_join(request.command.iter().map(String::as_str))
             .unwrap_or_else(|_| request.command.join(" "))
@@ -488,8 +498,11 @@ fn approval_request_payload(
         "command": request.command,
         "cwd": request.cwd.display().to_string(),
         "reason": request.reason,
-        "availableDecisions": request.effective_available_decisions(),
+        "availableDecisions": available_decisions,
     });
+    if let Some(command) = persistent_approval_command {
+        payload["persistentApprovalCommand"] = command.into();
+    }
     if let Some(reply_id) = reply_id {
         payload["replyId"] = reply_id.into();
     }
@@ -978,7 +991,7 @@ mod tests {
 
     #[test]
     fn resolve_approval_control_preserves_security_identity() {
-        for decision_value in ["accept", "cancel", "invalid"] {
+        for decision_value in ["accept", "accept-persistent", "cancel", "invalid"] {
             let mut payload = control_payload("resolve_approval");
             payload.thread_id = Some("00000000-0000-0000-0000-000000000123".to_string());
             payload.turn_id = Some("turn-1".to_string());
@@ -1073,6 +1086,52 @@ mod tests {
                 .is_some_and(|text| text.contains("Remove-Item"))
         );
         assert_eq!(payload["command"], json!(request.command));
+    }
+
+    #[test]
+    fn approval_request_payload_preserves_the_persistent_execpolicy_choice() {
+        let thread_id = ThreadId::new();
+        let amendment = codex_app_server_protocol::ExecPolicyAmendment {
+            command: vec![
+                "Remove-Item".to_string(),
+                "-LiteralPath".to_string(),
+                "C:\\tmp\\target".to_string(),
+                "-Recurse".to_string(),
+                "-Force".to_string(),
+            ],
+        };
+        let request = ExecApprovalRequestEvent {
+            call_id: "item-prefix".to_string(),
+            approval_id: Some("approval-prefix".to_string()),
+            turn_id: "turn-prefix".to_string(),
+            environment_id: None,
+            raw_command: None,
+            command: amendment.command.clone(),
+            cwd: codex_utils_absolute_path::AbsolutePathBuf::current_dir()
+                .expect("current directory"),
+            reason: None,
+            proposed_execpolicy_amendment: Some(amendment),
+            proposed_network_policy_amendments: None,
+            available_decisions: None,
+            network_approval_context: None,
+            additional_permissions: None,
+        };
+
+        let payload = approval_request_payload(
+            thread_id,
+            &request,
+            Some("reply-prefix"),
+            Some("task-prefix"),
+        );
+
+        assert_eq!(
+            payload["persistentApprovalCommand"],
+            "Remove-Item -LiteralPath C:\\tmp\\target -Recurse -Force"
+        );
+        assert_eq!(
+            payload["availableDecisions"].as_array().map(Vec::len),
+            Some(3)
+        );
     }
 
     fn pending_message(priority: ReliablePriority, index: usize) -> PendingReliableMessage {

@@ -121,6 +121,31 @@ impl ChatWidget {
         Ok(())
     }
 
+    pub(crate) fn remote_im_exec_approval_decision(
+        &self,
+        approval_id: &str,
+        decision: &str,
+    ) -> Result<CommandExecutionApprovalDecision, String> {
+        let Some(pending) = self.remote_im_pending_exec_approvals.get(approval_id) else {
+            return Err("approval is no longer pending".to_string());
+        };
+        let selected = pending
+            .available_decisions
+            .iter()
+            .find(|candidate| match decision {
+                "accept" => matches!(candidate, CommandExecutionApprovalDecision::Accept),
+                "accept-persistent" => matches!(
+                    candidate,
+                    CommandExecutionApprovalDecision::AcceptWithExecpolicyAmendment { .. }
+                ),
+                "cancel" => matches!(candidate, CommandExecutionApprovalDecision::Cancel),
+                _ => false,
+            });
+        selected
+            .cloned()
+            .ok_or_else(|| "approval decision is not available for this request".to_string())
+    }
+
     pub(crate) fn note_remote_im_exec_approval_resolved(&mut self, approval_id: &str) {
         let Some(pending) = self.remote_im_pending_exec_approvals.remove(approval_id) else {
             return;

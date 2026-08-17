@@ -373,15 +373,9 @@ impl App {
             } => {
                 let parsed_thread_id = ThreadId::from_string(&thread_id)
                     .map_err(|err| format!("invalid Codex thread id: {err}"));
-                let parsed_decision = match decision.as_str() {
-                    "accept" => {
-                        Ok(codex_app_server_protocol::CommandExecutionApprovalDecision::Accept)
-                    }
-                    "cancel" => {
-                        Ok(codex_app_server_protocol::CommandExecutionApprovalDecision::Cancel)
-                    }
-                    _ => Err("unsupported approval decision".to_string()),
-                };
+                let parsed_decision = self
+                    .chat_widget
+                    .remote_im_exec_approval_decision(&approval_id, &decision);
 
                 let result = match (parsed_thread_id, parsed_decision) {
                     (Ok(thread_id), Ok(decision)) => {
