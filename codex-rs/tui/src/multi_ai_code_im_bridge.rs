@@ -324,11 +324,17 @@ fn control_payload_to_app_event(payload: ControlPayload, token: &str) -> Option<
             task_id: payload.task_id,
         }),
         "submit_user_message" => {
-            let remote_im_input = match payload.input_origin.as_deref() {
-                Some("remote-im") => true,
-                Some("local") => false,
-                _ => payload.reply_id.is_some() || payload.task_id.is_some(),
-            };
+            let remote_im_input = matches!(payload.input_origin.as_deref(), Some("remote-im"))
+                || (payload.input_origin.is_none()
+                    && (payload.reply_id.is_some() || payload.task_id.is_some()));
+            let preserve_remote_im_route =
+                matches!(payload.input_origin.as_deref(), Some("remote-im-machine"));
+            let reply_id = (!preserve_remote_im_route)
+                .then_some(payload.reply_id)
+                .flatten();
+            let task_id = (!preserve_remote_im_route)
+                .then_some(payload.task_id)
+                .flatten();
             Some(AppEvent::MultiAiCodeImSubmitUserMessage {
                 request_id: payload.request_id?,
                 text: payload.text.unwrap_or_default(),
@@ -346,8 +352,9 @@ fn control_payload_to_app_event(payload: ControlPayload, token: &str) -> Option<
                     })
                     .collect(),
                 remote_im_input,
-                reply_id: payload.reply_id,
-                task_id: payload.task_id,
+                preserve_remote_im_route,
+                reply_id,
+                task_id,
             })
         }
         "interrupt" => Some(AppEvent::MultiAiCodeImInterrupt {
@@ -1180,6 +1187,7 @@ mod tests {
                 display_text,
                 local_image_paths,
                 remote_im_input,
+                preserve_remote_im_route,
                 reply_id,
                 task_id
             } if request_id == "req-1"
@@ -1187,6 +1195,7 @@ mod tests {
                 && display_text == "[来自远程 IM：phone]\n你好"
                 && local_image_paths == vec![image_path]
                 && remote_im_input
+                && !preserve_remote_im_route
                 && reply_id.as_deref() == Some("rim-fixed")
                 && task_id.as_deref() == Some("task-fixed")
         ));
@@ -1199,6 +1208,33 @@ mod tests {
             Some("Codex turn completed without a final assistant response.")
         );
         assert_eq!(empty_assistant_final_error("completed"), None);
+    }
+
+    #[test]
+    fn machine_input_cannot_claim_remote_reply_authority() {
+        let mut payload = control_payload("submit_user_message");
+        payload.text = Some("machine steer".to_string());
+        payload.display_text = Some("[来自远程 IM：agent-b]\n协作补充".to_string());
+        payload.input_origin = Some("remote-im-machine".to_string());
+        payload.reply_id = Some("forged-reply".to_string());
+        payload.task_id = Some("forged-task".to_string());
+
+        let event = control_payload_to_app_event(payload, "token")
+            .expect("expected machine IM message to map to app event");
+
+        assert!(matches!(
+            event,
+            AppEvent::MultiAiCodeImSubmitUserMessage {
+                remote_im_input,
+                preserve_remote_im_route,
+                reply_id,
+                task_id,
+                ..
+            } if !remote_im_input
+                && preserve_remote_im_route
+                && reply_id.is_none()
+                && task_id.is_none()
+        ));
     }
 
     #[test]

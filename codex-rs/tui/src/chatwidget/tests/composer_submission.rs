@@ -164,6 +164,7 @@ async fn remote_im_submission_keeps_model_prompt_out_of_tui_preview() {
             display_text.to_string(),
             Vec::new(),
             true,
+            false,
             Some("rim-0123456789abcdef".to_string()),
             Some("task-fixed".to_string()),
         ),
@@ -199,6 +200,7 @@ async fn source_submission_preserves_local_image_attachments() {
             "inspect the attached image".to_string(),
             vec![image_path.clone()],
             false,
+            false,
             None,
             None,
         ),
@@ -230,6 +232,7 @@ async fn remote_im_forwarding_stays_active_until_direct_tui_input() {
             "[来自远程 IM：phone]\n第一条".to_string(),
             Vec::new(),
             true,
+            false,
             None,
             None,
         ),
@@ -243,6 +246,7 @@ async fn remote_im_forwarding_stays_active_until_direct_tui_input() {
             "[来自远程 IM：phone]\n第二条".to_string(),
             Vec::new(),
             true,
+            false,
             None,
             None,
         ),
@@ -264,6 +268,7 @@ async fn direct_tui_input_consumes_an_unbound_remote_route() {
             "[来自远程 IM：phone]\n待处理".to_string(),
             Vec::new(),
             true,
+            false,
             Some("rim-pending-local-takeover".to_string()),
             Some("task-pending-local-takeover".to_string()),
         ),
@@ -281,24 +286,46 @@ async fn direct_tui_input_consumes_an_unbound_remote_route() {
 }
 
 #[tokio::test]
-async fn remote_im_submission_does_not_steer_an_active_local_turn() {
-    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.on_task_started();
+async fn machine_remote_im_steer_preserves_human_forwarding_authority() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_remote_im_input_origin(true);
 
     assert_eq!(
         chat.submit_user_message_from_remote_im(
-            "[来自远程 IM：peer]\n不要混入本地任务".to_string(),
-            "[来自远程 IM：peer]\n不要混入本地任务".to_string(),
+            "[来自远程 IM：agent-b]\n协作补充".to_string(),
+            "[来自远程 IM：agent-b]\n协作补充".to_string(),
             Vec::new(),
+            false,
             true,
-            Some("rim-local-busy".to_string()),
-            Some("task-local-busy".to_string()),
+            None,
+            None,
         ),
-        Err("Codex is already processing a local or previously submitted turn".to_string())
+        Ok(())
     );
-    assert!(chat.remote_im_pending_replies.is_empty());
-    assert!(chat.input_queue.pending_steers.is_empty());
-    assert_no_submit_op(&mut op_rx);
+
+    assert!(chat.remote_im_forwarding_active);
+}
+
+#[tokio::test]
+async fn repeated_human_steer_reuses_one_pending_remote_route() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    for text in ["第一条", "中途补充"] {
+        assert_eq!(
+            chat.submit_user_message_from_remote_im(
+                format!("[来自远程 IM：phone]\n{text}"),
+                format!("[来自远程 IM：phone]\n{text}"),
+                Vec::new(),
+                true,
+                false,
+                Some("rim-shared".to_string()),
+                Some("task-shared".to_string()),
+            ),
+            Ok(())
+        );
+    }
+
+    assert_eq!(chat.remote_im_pending_replies.len(), 1);
 }
 
 #[tokio::test]
@@ -341,6 +368,7 @@ async fn remote_im_submission_does_not_render_committed_model_prompt_echo() {
             display_text.to_string(),
             Vec::new(),
             true,
+            false,
             Some("rim-0123456789abcdef".to_string()),
             Some("task-fixed".to_string()),
         ),

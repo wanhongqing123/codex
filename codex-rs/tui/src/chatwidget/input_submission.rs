@@ -56,6 +56,15 @@ impl ChatWidget {
         let Some(reply_id) = reply_id else {
             return;
         };
+        if (self.remote_im_active_reply_id.as_deref() == Some(reply_id.as_str())
+            && self.remote_im_active_task_id == task_id)
+            || self
+                .remote_im_pending_replies
+                .iter()
+                .any(|pending| pending.reply_id == reply_id && pending.task_id == task_id)
+        {
+            return;
+        }
         const MAX_PENDING_REMOTE_IM_REPLIES: usize = 32;
         if self.remote_im_pending_replies.len() >= MAX_PENDING_REMOTE_IM_REPLIES {
             self.remote_im_pending_replies.pop_front();
@@ -170,18 +179,12 @@ impl ChatWidget {
         display_text: String,
         local_image_paths: Vec<PathBuf>,
         remote_im_input: bool,
+        preserve_remote_im_route: bool,
         reply_id: Option<String>,
         task_id: Option<String>,
     ) -> Result<(), String> {
         if text.trim().is_empty() {
             return Err("IM message is empty".to_string());
-        }
-        if remote_im_input
-            && (self.turn_lifecycle.agent_turn_running || self.input_queue.user_turn_pending_start)
-        {
-            return Err(
-                "Codex is already processing a local or previously submitted turn".to_string(),
-            );
         }
         let reply_id =
             reply_id.or_else(|| crate::multi_ai_code_im_bridge::remote_im_reply_id(&text));
@@ -206,7 +209,7 @@ impl ChatWidget {
             history_record,
             ShellEscapePolicy::Disallow,
         );
-        if accepted {
+        if accepted && !preserve_remote_im_route {
             self.set_remote_im_input_origin(remote_im_input);
         }
         self.remember_remote_im_reply(

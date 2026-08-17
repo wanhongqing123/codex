@@ -272,6 +272,7 @@ impl App {
                 display_text,
                 local_image_paths,
                 remote_im_input,
+                preserve_remote_im_route,
                 reply_id,
                 task_id,
             } => {
@@ -280,6 +281,7 @@ impl App {
                     display_text,
                     local_image_paths,
                     remote_im_input,
+                    preserve_remote_im_route,
                     reply_id,
                     task_id,
                 ) {
