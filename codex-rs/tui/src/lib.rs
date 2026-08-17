@@ -858,6 +858,7 @@ fn loader_overrides_are_default(loader_overrides: &LoaderOverrides) -> bool {
         && !loader_overrides.ignore_managed_requirements
         && !loader_overrides.ignore_user_config
         && !loader_overrides.ignore_user_and_project_exec_policy_rules
+        && !loader_overrides.dangerously_bypass_exec_policy
         && loader_overrides
             .macos_managed_config_requirements_base64
             .is_none();
@@ -935,6 +936,8 @@ pub async fn run_main(
     };
 
     let mut launch_loader_overrides = loader_overrides.clone();
+    launch_loader_overrides.dangerously_bypass_exec_policy =
+        cli.dangerously_bypass_approvals_and_sandbox;
     if let Some(profile_v2) = cli.config_profile_v2.as_ref() {
         let user_config_path = resolve_profile_v2_config_path(&codex_home, profile_v2);
         launch_loader_overrides.user_config_path = Some(user_config_path);
@@ -979,6 +982,7 @@ pub async fn run_main(
         prepared_environment_manager.default_environment_is_remote(),
     )?;
     let mut loader_overrides = loader_overrides;
+    loader_overrides.dangerously_bypass_exec_policy = cli.dangerously_bypass_approvals_and_sandbox;
     if let Some(profile_v2) = cli.config_profile_v2.as_ref() {
         let user_config_path = resolve_profile_v2_config_path(&codex_home, profile_v2);
         loader_overrides.user_config_path = Some(user_config_path);
@@ -2594,6 +2598,16 @@ mod tests {
         assert!(!can_reuse_implicit_local_daemon(
             &[],
             &loader_overrides,
+            /*strict_config*/ false,
+            /*has_non_replayable_launch_overrides*/ false,
+        ));
+        let dangerous_loader_overrides = LoaderOverrides {
+            dangerously_bypass_exec_policy: true,
+            ..Default::default()
+        };
+        assert!(!can_reuse_implicit_local_daemon(
+            &[],
+            &dangerous_loader_overrides,
             /*strict_config*/ false,
             /*has_non_replayable_launch_overrides*/ false,
         ));

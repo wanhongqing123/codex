@@ -2042,6 +2042,24 @@ async fn dangerous_rm_rf_requires_approval_in_danger_full_access() {
     .await;
 }
 
+#[test]
+fn explicit_dangerous_bypass_skips_all_exec_policy_checks() {
+    let normal_stack = ConfigLayerStack::default();
+    assert_eq!(
+        dangerous_bypass_exec_approval_requirement(&normal_stack),
+        None
+    );
+
+    let dangerous_stack = ConfigLayerStack::default().with_dangerous_exec_policy_bypass(true);
+    assert_eq!(
+        dangerous_bypass_exec_approval_requirement(&dangerous_stack),
+        Some(ExecApprovalRequirement::Skip {
+            bypass_sandbox: true,
+            proposed_execpolicy_amendment: None,
+        })
+    );
+}
+
 #[tokio::test]
 async fn dangerous_rm_rf_in_shell_loop_requires_approval_in_danger_full_access() {
     let command = vec_str(&[

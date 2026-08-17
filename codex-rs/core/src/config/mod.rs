@@ -1868,6 +1868,11 @@ impl Config {
             refreshed_config
                 .config_layer_stack
                 .ignore_user_and_project_exec_policy_rules(),
+        )
+        .with_dangerous_exec_policy_bypass(
+            refreshed_config
+                .config_layer_stack
+                .dangerously_bypass_exec_policy(),
         );
         let cfg: ConfigToml = config_layer_stack
             .effective_config()

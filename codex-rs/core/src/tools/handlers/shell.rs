@@ -6,6 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::exec::ExecParams;
 use crate::exec_policy::ExecApprovalRequest;
+use crate::exec_policy::dangerous_bypass_exec_approval_requirement;
 use crate::function_tool::FunctionCallError;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnEnvironment;
@@ -173,23 +174,29 @@ async fn run_exec_like(args: RunExecLikeArgs) -> Result<FunctionToolOutput, Func
     );
     emitter.begin(event_ctx).await;
 
-    let exec_approval_requirement = session
-        .services
-        .exec_policy
-        .create_exec_approval_requirement_for_command(ExecApprovalRequest {
-            command: &exec_params.command,
-            approval_policy: turn.approval_policy(),
-            permission_profile: turn_environment.permission_profile().clone(),
-            windows_sandbox_level: turn.windows_sandbox_level,
-            sandbox_permissions: if effective_additional_permissions.permissions_preapproved {
-                codex_protocol::models::SandboxPermissions::UseDefault
-            } else {
-                effective_additional_permissions.sandbox_permissions
-            },
-            prefix_rule,
-            allow_prefix_rules: turn.allow_prefix_rules(),
-        })
-        .await;
+    let exec_approval_requirement = if let Some(requirement) =
+        dangerous_bypass_exec_approval_requirement(&turn.config.config_layer_stack)
+    {
+        requirement
+    } else {
+        session
+            .services
+            .exec_policy
+            .create_exec_approval_requirement_for_command(ExecApprovalRequest {
+                command: &exec_params.command,
+                approval_policy: turn.approval_policy(),
+                permission_profile: turn_environment.permission_profile().clone(),
+                windows_sandbox_level: turn.windows_sandbox_level,
+                sandbox_permissions: if effective_additional_permissions.permissions_preapproved {
+                    codex_protocol::models::SandboxPermissions::UseDefault
+                } else {
+                    effective_additional_permissions.sandbox_permissions
+                },
+                prefix_rule,
+                allow_prefix_rules: turn.allow_prefix_rules(),
+            })
+            .await
+    };
 
     let req = ShellRequest {
         command: exec_params.command.clone(),
