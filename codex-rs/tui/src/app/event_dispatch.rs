@@ -6,6 +6,7 @@
 use super::resize_reflow::trailing_run_start;
 use super::session_lifecycle::ThreadAttachPresentation;
 use super::*;
+use crate::app::app_server_requests::ResolvedAppServerRequest;
 use crate::app_server_session::ForkGoalContinuation;
 use crate::app_server_session::UnsupportedLegacyPermissionProfile;
 use crate::app_server_session::turn_permissions_overrides;
@@ -267,6 +268,320 @@ impl App {
 
                 self.chat_widget.maybe_send_next_queued_input();
                 // Leaving alt-screen may blank the inline viewport; force a redraw either way.
+                tui.frame_requester().schedule_frame();
+            }
+            AppEvent::MultiAiCodeImSwitchMode { mode, request_id } => {
+                let result = self
+                    .chat_widget
+                    .switch_collaboration_mode_from_remote_im(mode);
+                // Report the real outcome so the host never claims a switch
+                // that the TUI actually refused (disabled modes, running turn...).
+                if let Some(request_id) = request_id.as_deref() {
+                    match &result {
+                        Ok(()) => crate::multi_ai_code_im_bridge::send_control_result(
+                            request_id, true, "", None,
+                        ),
+                        Err(message) => crate::multi_ai_code_im_bridge::send_control_result(
+                            request_id,
+                            false,
+                            "",
+                            Some(message),
+                        ),
+                    }
+                }
+                if result.is_ok() {
+                    tui.frame_requester().schedule_frame();
+                }
+            }
+            AppEvent::MultiAiCodeImStatus { request_id } => {
+                let text = self.chat_widget.add_status_output_from_remote_im();
+                crate::multi_ai_code_im_bridge::send_control_result(&request_id, true, &text, None);
+                tui.frame_requester().schedule_frame();
+            }
+            AppEvent::MultiAiCodeImModel {
+                request_id,
+                model,
+                reasoning,
+            } => {
+                match self
+                    .chat_widget
+                    .model_control_output_from_remote_im(model.as_deref(), reasoning.as_deref())
+                {
+                    Ok((text, switched_model, switched_reasoning)) => {
+                        crate::multi_ai_code_im_bridge::send_control_result(
+                            &request_id,
+                            true,
+                            &text,
+                            None,
+                        );
+                        if let Some(switched_model) = switched_model {
+                            self.sync_active_thread_model_setting(
+                                app_server,
+                                switched_model,
+                                /*effort*/ None,
+                            )
+                            .await;
+                            self.sync_active_thread_service_tier_to_cached_session()
+                                .await;
+                        }
+                        if let Some(switched_reasoning) = switched_reasoning {
+                            self.on_update_reasoning_effort(Some(switched_reasoning.clone()));
+                            self.sync_active_thread_reasoning_setting(
+                                app_server,
+                                Some(switched_reasoning),
+                            )
+                            .await;
+                        }
+                    }
+                    Err(message) => {
+                        crate::multi_ai_code_im_bridge::send_control_result(
+                            &request_id,
+                            false,
+                            "",
+                            Some(&message),
+                        );
+                    }
+                }
+                tui.frame_requester().schedule_frame();
+            }
+            AppEvent::MultiAiCodeImBtw {
+                request_id,
+                task,
+                reply_id,
+                task_id,
+            } => {
+                match self
+                    .chat_widget
+                    .submit_btw_from_remote_im(task, reply_id, task_id)
+                {
+                    Ok(()) => {
+                        crate::multi_ai_code_im_bridge::send_control_result(
+                            &request_id,
+                            true,
+                            "已提交 /btw 子任务，完成后会通过 IM 回传。",
+                            None,
+                        );
+                    }
+                    Err(message) => {
+                        crate::multi_ai_code_im_bridge::send_control_result(
+                            &request_id,
+                            false,
+                            "",
+                            Some(&message),
+                        );
+                    }
+                }
+                tui.frame_requester().schedule_frame();
+            }
+            AppEvent::MultiAiCodeImSubmitUserMessage {
+                request_id,
+                text,
+                display_text,
+                local_image_paths,
+                remote_im_input,
+                preserve_remote_im_route,
+                reply_id,
+                task_id,
+            } => {
+                match self.chat_widget.submit_user_message_from_remote_im(
+                    text,
+                    display_text,
+                    local_image_paths,
+                    remote_im_input,
+                    preserve_remote_im_route,
+                    reply_id,
+                    task_id,
+                ) {
+                    Ok(()) => crate::multi_ai_code_im_bridge::send_control_result(
+                        &request_id,
+                        true,
+                        "queued",
+                        None,
+                    ),
+                    Err(message) => crate::multi_ai_code_im_bridge::send_control_result(
+                        &request_id,
+                        false,
+                        "",
+                        Some(&message),
+                    ),
+                }
+                tui.frame_requester().schedule_frame();
+            }
+            AppEvent::MultiAiCodeImInterrupt { request_id } => {
+                match self.chat_widget.interrupt_from_remote_im() {
+                    Ok(()) => crate::multi_ai_code_im_bridge::send_control_result(
+                        &request_id,
+                        true,
+                        "已请求中断当前任务。",
+                        None,
+                    ),
+                    Err(message) => crate::multi_ai_code_im_bridge::send_control_result(
+                        &request_id,
+                        false,
+                        "",
+                        Some(&message),
+                    ),
+                }
+                tui.frame_requester().schedule_frame();
+            }
+            AppEvent::MultiAiCodeImCompact { request_id } => {
+                match self.chat_widget.compact_from_remote_im() {
+                    Ok(()) => crate::multi_ai_code_im_bridge::send_control_result(
+                        &request_id,
+                        true,
+                        "已请求压缩当前上下文。",
+                        None,
+                    ),
+                    Err(message) => crate::multi_ai_code_im_bridge::send_control_result(
+                        &request_id,
+                        false,
+                        "",
+                        Some(&message),
+                    ),
+                }
+                tui.frame_requester().schedule_frame();
+            }
+            AppEvent::MultiAiCodeImClear { request_id } => {
+                if self.chat_widget.is_task_running() {
+                    crate::multi_ai_code_im_bridge::send_control_result(
+                        &request_id,
+                        false,
+                        "",
+                        Some("当前任务运行中，请先 /interrupt 或等待结束后再 /clear。"),
+                    );
+                    tui.frame_requester().schedule_frame();
+                } else {
+                    self.clear_terminal_ui(tui, /*redraw_header*/ false)?;
+                    self.reset_app_ui_state_after_clear();
+                    self.start_fresh_session_with_summary_hint(
+                        tui,
+                        app_server,
+                        Some(ThreadStartSource::Clear),
+                        /*initial_user_message*/ None,
+                        /*new_thread_name*/ None,
+                    )
+                    .await;
+                    crate::multi_ai_code_im_bridge::send_control_result(
+                        &request_id,
+                        true,
+                        "已清空上下文并开启新会话。",
+                        None,
+                    );
+                    tui.frame_requester().schedule_frame();
+                }
+            }
+            AppEvent::MultiAiCodeImResolveApproval {
+                request_id,
+                thread_id,
+                turn_id,
+                task_id,
+                approval_id,
+                decision,
+            } => {
+                let parsed_thread_id = ThreadId::from_string(&thread_id)
+                    .map_err(|err| format!("invalid Codex thread id: {err}"));
+                let parsed_decision = self
+                    .chat_widget
+                    .remote_im_exec_approval_decision(&approval_id, &decision);
+
+                let result = match (parsed_thread_id, parsed_decision) {
+                    (Ok(thread_id), Ok(decision)) => {
+                        if let Err(message) = self.chat_widget.validate_remote_im_exec_approval(
+                            thread_id,
+                            &turn_id,
+                            &task_id,
+                            &approval_id,
+                            &decision,
+                        ) {
+                            Err(message)
+                        } else if !self
+                            .pending_app_server_requests
+                            .has_exec_approval(&thread_id.to_string(), &approval_id)
+                        {
+                            Err("approval is no longer pending".to_string())
+                        } else {
+                            let op = AppCommand::exec_approval(
+                                approval_id.clone(),
+                                Some(turn_id.clone()),
+                                decision,
+                            );
+                            match self
+                                .try_resolve_app_server_request(app_server, thread_id, &op)
+                                .await
+                            {
+                                Ok(true) => {
+                                    let resolved = ResolvedAppServerRequest::ExecApproval {
+                                        thread_id: thread_id.to_string(),
+                                        id: approval_id.clone(),
+                                    };
+                                    self.chat_widget.dismiss_app_server_request(&resolved);
+                                    self.chat_widget
+                                        .note_remote_im_exec_approval_resolved(&approval_id);
+                                    Ok(())
+                                }
+                                Ok(false) => Err("approval is no longer pending".to_string()),
+                                Err(err) => Err(format!("failed to resolve approval: {err}")),
+                            }
+                        }
+                    }
+                    (Err(message), _) | (_, Err(message)) => Err(message),
+                };
+                match result {
+                    Ok(()) => crate::multi_ai_code_im_bridge::send_control_result(
+                        &request_id,
+                        true,
+                        "approval resolved",
+                        None,
+                    ),
+                    Err(message) => crate::multi_ai_code_im_bridge::send_control_result(
+                        &request_id,
+                        false,
+                        "",
+                        Some(&message),
+                    ),
+                }
+                tui.frame_requester().schedule_frame();
+            }
+            AppEvent::MultiAiCodeImTheme { request_id, bg, fg } => {
+                // 运行时更新终端默认前景/背景色（明暗判定读的就是这个），再请求重绘，
+                // 使 codex TUI 跟随宿主主题切换、无需重启会话。fg 缺省时按 bg 明暗推导。
+                let fg = fg.unwrap_or_else(|| {
+                    if crate::color::is_light(bg) {
+                        (0, 0, 0)
+                    } else {
+                        (255, 255, 255)
+                    }
+                });
+                crate::terminal_palette::set_default_colors_from_startup_probe(Some(
+                    crate::terminal_probe::DefaultColors { fg, bg },
+                ));
+                tui.frame_requester().schedule_frame();
+                if let Some(request_id) = request_id.as_deref() {
+                    crate::multi_ai_code_im_bridge::send_control_result(request_id, true, "", None);
+                }
+            }
+            AppEvent::MultiAiCodeImGoal { request_id, goal } => {
+                match self
+                    .handle_multi_ai_code_im_goal_control(app_server, goal)
+                    .await
+                {
+                    Ok(text) => {
+                        crate::multi_ai_code_im_bridge::send_control_result(
+                            &request_id,
+                            true,
+                            &text,
+                            None,
+                        );
+                    }
+                    Err(message) => {
+                        crate::multi_ai_code_im_bridge::send_control_result(
+                            &request_id,
+                            false,
+                            "",
+                            Some(&message),
+                        );
+                    }
+                }
                 tui.frame_requester().schedule_frame();
             }
             AppEvent::OpenExternalAgentConfigMigration => {
@@ -2503,10 +2818,17 @@ impl App {
             }
             AppEvent::StartSide {
                 parent_thread_id,
+                auto_return_on_turn_complete,
                 user_message,
             } => {
                 return self
-                    .handle_start_side(tui, app_server, parent_thread_id, user_message)
+                    .handle_start_side(
+                        tui,
+                        app_server,
+                        parent_thread_id,
+                        auto_return_on_turn_complete,
+                        user_message,
+                    )
                     .await;
             }
             AppEvent::OpenSkillsList => {

@@ -94,6 +94,22 @@ impl PendingAppServerRequests {
         self.mcp_requests.clear();
     }
 
+    pub(super) fn has_exec_approval(&self, thread_id: &str, id: &str) -> bool {
+        self.exec_approvals
+            .contains_key(&(Self::canonical_thread_id(thread_id), id.to_string()))
+    }
+
+    pub(super) fn restore_exec_approval(
+        &mut self,
+        thread_id: &str,
+        id: String,
+        request_id: AppServerRequestId,
+    ) {
+        self.exec_approvals
+            .entry((Self::canonical_thread_id(thread_id), id))
+            .or_insert(request_id);
+    }
+
     pub(super) fn note_server_request(
         &mut self,
         request: &ServerRequest,
@@ -512,6 +528,42 @@ mod tests {
 
         assert_eq!(resolution.request_id, AppServerRequestId::Integer(41));
         assert_eq!(resolution.result, json!({ "decision": "accept" }));
+    }
+
+    #[test]
+    fn failed_exec_approval_resolution_can_be_restored_and_retried() {
+        let mut pending = PendingAppServerRequests::default();
+        let thread_id = codex_protocol::ThreadId::new().to_string();
+        let request_id = AppServerRequestId::Integer(42);
+        pending.restore_exec_approval(&thread_id, "approval-retry".to_string(), request_id.clone());
+
+        let first = pending
+            .take_resolution(
+                &thread_id,
+                &Op::ExecApproval {
+                    id: "approval-retry".to_string(),
+                    turn_id: Some("turn-retry".to_string()),
+                    decision: CommandExecutionApprovalDecision::Accept,
+                },
+            )
+            .expect("resolution should serialize")
+            .expect("restored request should be pending");
+        assert_eq!(first.request_id, request_id);
+
+        pending.restore_exec_approval(&thread_id, "approval-retry".to_string(), first.request_id);
+        let retry = pending
+            .take_resolution(
+                &thread_id,
+                &Op::ExecApproval {
+                    id: "approval-retry".to_string(),
+                    turn_id: Some("turn-retry".to_string()),
+                    decision: CommandExecutionApprovalDecision::Cancel,
+                },
+            )
+            .expect("retry should serialize")
+            .expect("failed request should remain retryable");
+        assert_eq!(retry.request_id, AppServerRequestId::Integer(42));
+        assert_eq!(retry.result, json!({ "decision": "cancel" }));
     }
 
     #[test]

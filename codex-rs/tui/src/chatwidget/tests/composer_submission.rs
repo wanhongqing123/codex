@@ -344,6 +344,256 @@ async fn parent_owned_thread_preserves_queued_input_before_draining() {
 }
 
 #[tokio::test]
+async fn remote_im_submission_keeps_model_prompt_out_of_tui_preview() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let model_text = "[来自远程 IM：phone]\n你好\n\n[IM_REPLY] internal protocol";
+    let display_text = "[来自远程 IM：phone]\n你好";
+
+    assert_eq!(
+        chat.submit_user_message_from_remote_im(
+            model_text.to_string(),
+            display_text.to_string(),
+            Vec::new(),
+            true,
+            false,
+            Some("rim-0123456789abcdef".to_string()),
+            Some("task-fixed".to_string()),
+        ),
+        Ok(())
+    );
+    assert!(op_rx.try_recv().is_err());
+
+    let queued = chat
+        .input_queue
+        .queued_user_messages
+        .front()
+        .expect("remote IM message should queue until the session is configured");
+    let history = chat
+        .input_queue
+        .queued_user_message_history_records
+        .front()
+        .expect("remote IM display override should be retained");
+    assert_eq!(queued.user_message.text, model_text);
+    assert_eq!(
+        user_message_preview_text(&queued.user_message, Some(history)),
+        display_text
+    );
+}
+
+#[tokio::test]
+async fn source_submission_preserves_local_image_attachments() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let image_path = std::path::PathBuf::from("/tmp/scheduled-task-image.png");
+
+    assert_eq!(
+        chat.submit_user_message_from_remote_im(
+            "inspect the attached image".to_string(),
+            "inspect the attached image".to_string(),
+            vec![image_path.clone()],
+            false,
+            false,
+            None,
+            None,
+        ),
+        Ok(())
+    );
+    assert!(op_rx.try_recv().is_err());
+
+    let queued = chat
+        .input_queue
+        .queued_user_messages
+        .front()
+        .expect("source-submitted message should queue until the session is configured");
+    assert_eq!(queued.user_message.local_images.len(), 1);
+    assert_eq!(queued.user_message.local_images[0].path, image_path);
+    assert_eq!(
+        queued.user_message.local_images[0].placeholder,
+        "[Image #1]"
+    );
+}
+
+#[tokio::test]
+async fn remote_im_forwarding_stays_active_until_direct_tui_input() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    assert!(!chat.remote_im_forwarding_active);
+    assert_eq!(
+        chat.submit_user_message_from_remote_im(
+            "[来自远程 IM：phone]\n第一条".to_string(),
+            "[来自远程 IM：phone]\n第一条".to_string(),
+            Vec::new(),
+            true,
+            false,
+            None,
+            None,
+        ),
+        Ok(())
+    );
+    assert!(chat.remote_im_forwarding_active);
+
+    assert_eq!(
+        chat.submit_user_message_from_remote_im(
+            "[来自远程 IM：phone]\n第二条".to_string(),
+            "[来自远程 IM：phone]\n第二条".to_string(),
+            Vec::new(),
+            true,
+            false,
+            None,
+            None,
+        ),
+        Ok(())
+    );
+    assert!(chat.remote_im_forwarding_active);
+
+    chat.submit_user_message(UserMessage::from("来自 TUI 的本地输入"));
+    assert!(!chat.remote_im_forwarding_active);
+}
+
+#[tokio::test]
+async fn direct_tui_input_consumes_an_unbound_remote_route() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    assert_eq!(
+        chat.submit_user_message_from_remote_im(
+            "[来自远程 IM：phone]\n待处理".to_string(),
+            "[来自远程 IM：phone]\n待处理".to_string(),
+            Vec::new(),
+            true,
+            false,
+            Some("rim-pending-local-takeover".to_string()),
+            Some("task-pending-local-takeover".to_string()),
+        ),
+        Ok(())
+    );
+    assert_eq!(chat.remote_im_pending_replies.len(), 1);
+    assert!(chat.remote_im_pending_replies[0].bound_turn_id.is_none());
+
+    chat.submit_user_message(UserMessage::from("本地用户接管"));
+
+    assert!(!chat.remote_im_forwarding_active);
+    assert!(chat.remote_im_pending_replies.is_empty());
+    assert!(chat.remote_im_active_reply_id.is_none());
+    assert!(chat.remote_im_active_task_id.is_none());
+}
+
+#[tokio::test]
+async fn machine_remote_im_steer_preserves_human_forwarding_authority() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_remote_im_input_origin(true);
+
+    assert_eq!(
+        chat.submit_user_message_from_remote_im(
+            "[来自远程 IM：agent-b]\n协作补充".to_string(),
+            "[来自远程 IM：agent-b]\n协作补充".to_string(),
+            Vec::new(),
+            false,
+            true,
+            None,
+            None,
+        ),
+        Ok(())
+    );
+
+    assert!(chat.remote_im_forwarding_active);
+}
+
+#[tokio::test]
+async fn repeated_human_steer_reuses_one_pending_remote_route() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    for text in ["第一条", "中途补充"] {
+        assert_eq!(
+            chat.submit_user_message_from_remote_im(
+                format!("[来自远程 IM：phone]\n{text}"),
+                format!("[来自远程 IM：phone]\n{text}"),
+                Vec::new(),
+                true,
+                false,
+                Some("rim-shared".to_string()),
+                Some("task-shared".to_string()),
+            ),
+            Ok(())
+        );
+    }
+
+    assert_eq!(chat.remote_im_pending_replies.len(), 1);
+}
+
+#[tokio::test]
+async fn remote_im_submission_does_not_render_committed_model_prompt_echo() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let rollout_file = NamedTempFile::new().unwrap();
+    chat.handle_thread_session(crate::session_state::ThreadSessionState {
+        thread_id: ThreadId::new(),
+        forked_from_id: None,
+        fork_parent_title: None,
+        thread_name: None,
+        model: "test-model".to_string(),
+        model_provider_id: "test-provider".to_string(),
+        service_tier: None,
+        approval_policy: AskForApproval::Never,
+        approvals_reviewer: ApprovalsReviewer::User,
+        permission_profile: PermissionProfile::read_only(),
+        active_permission_profile: None,
+        cwd: test_path_buf("/home/user/project").abs(),
+        runtime_workspace_roots: Vec::new(),
+        instruction_source_paths: Vec::new(),
+        reasoning_effort: Some(ReasoningEffortConfig::default()),
+        collaboration_mode: None,
+        personality: None,
+        message_history: None,
+        network_proxy: None,
+        rollout_path: Some(rollout_file.path().to_path_buf()),
+    });
+    drain_insert_history(&mut rx);
+
+    let display_text = "[来自远程 IM：phone]\n你好";
+    let model_text = concat!(
+        "[来自远程 IM：phone]\n你好\n\n",
+        "[IM_REPLY] internal protocol\n",
+        "Opening marker: <remote-im-reply id=\"rim-0123456789abcdef\">"
+    );
+    assert_eq!(
+        chat.submit_user_message_from_remote_im(
+            model_text.to_string(),
+            display_text.to_string(),
+            Vec::new(),
+            true,
+            false,
+            Some("rim-0123456789abcdef".to_string()),
+            Some("task-fixed".to_string()),
+        ),
+        Ok(())
+    );
+
+    let submitted_items = match next_submit_op(&mut op_rx) {
+        Op::UserTurn { items, .. } => items,
+        other => panic!("expected Op::UserTurn, got {other:?}"),
+    };
+    assert!(
+        submitted_items
+            .iter()
+            .any(|item| matches!(item, UserInput::Text { text, .. } if text == model_text))
+    );
+    complete_user_message(&mut chat, "remote-user-1", model_text);
+    assert_eq!(
+        chat.remote_im_active_reply_id.as_deref(),
+        Some("rim-0123456789abcdef")
+    );
+    assert!(chat.remote_im_pending_replies.is_empty());
+
+    let mut rendered_user_messages = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let AppEvent::InsertHistoryCell(cell) = event
+            && let Some(cell) = cell.as_any().downcast_ref::<UserHistoryCell>()
+        {
+            rendered_user_messages.push(cell.message.clone());
+        }
+    }
+    assert_eq!(rendered_user_messages, vec![display_text.to_string()]);
+}
+
+#[tokio::test]
 async fn submission_preserves_text_elements_and_local_images() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 

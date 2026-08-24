@@ -60,6 +60,8 @@ pub(super) async fn run_main_inner(
     };
 
     let mut launch_loader_overrides = loader_overrides.clone();
+    launch_loader_overrides.dangerously_bypass_exec_policy =
+        cli.dangerously_bypass_approvals_and_sandbox;
     if let Some(profile_v2) = cli.config_profile_v2.as_ref() {
         let user_config_path = resolve_profile_v2_config_path(&codex_home, profile_v2);
         launch_loader_overrides.user_config_path = Some(user_config_path);
@@ -215,6 +217,7 @@ pub(super) async fn run_main_inner(
         prepared_environment_manager.default_environment_is_remote(),
     )?;
     let mut loader_overrides = loader_overrides;
+    loader_overrides.dangerously_bypass_exec_policy = cli.dangerously_bypass_approvals_and_sandbox;
     if let Some(profile_v2) = cli.config_profile_v2.as_ref() {
         let user_config_path = resolve_profile_v2_config_path(&codex_home, profile_v2);
         loader_overrides.user_config_path = Some(user_config_path);

@@ -3,6 +3,235 @@
 use super::*;
 
 impl ChatWidget {
+    pub(super) fn set_remote_im_input_origin(&mut self, remote_im: bool) {
+        if !remote_im {
+            // Revoke the remote capability synchronously inside the TUI before
+            // notifying the host. The data notification and approval control
+            // response use independent sockets, so relying on the host to send
+            // a later cancel would leave a window where a phone approval could
+            // still win after the local user had taken over the turn.
+            self.invalidate_remote_im_exec_approvals();
+        }
+        if self.remote_im_forwarding_active == remote_im {
+            return;
+        }
+        self.remote_im_forwarding_active = remote_im;
+        crate::multi_ai_code_im_bridge::send_input_origin(remote_im);
+        if !remote_im {
+            // A host route is registered before the control socket accepts the
+            // prompt. If local input wins before TurnStarted binds that route,
+            // there will never be a real turn terminal to release the host's
+            // admission lock. Emit an explicit terminal only for those still-
+            // unbound routes; bound routes keep their tombstone until the real
+            // turn terminal so another remote sender cannot steer that turn.
+            for pending in self
+                .remote_im_pending_replies
+                .iter()
+                .filter(|pending| pending.bound_turn_id.is_none())
+            {
+                crate::multi_ai_code_im_bridge::send_source_turn_error(
+                    "Remote IM input was superseded by local input before the turn started.",
+                    None,
+                    Some(pending.reply_id.as_str()),
+                    pending.task_id.as_deref(),
+                );
+            }
+            self.remote_im_active_reply_id = None;
+            self.remote_im_active_task_id = None;
+            self.remote_im_pending_replies.clear();
+        }
+    }
+
+    fn remember_remote_im_reply(
+        &mut self,
+        accepted: bool,
+        reply_id: Option<String>,
+        task_id: Option<String>,
+        source_routed: bool,
+        committed_echo: UserMessageDisplay,
+    ) {
+        if !accepted {
+            return;
+        }
+        let Some(reply_id) = reply_id else {
+            return;
+        };
+        if (self.remote_im_active_reply_id.as_deref() == Some(reply_id.as_str())
+            && self.remote_im_active_task_id == task_id)
+            || self
+                .remote_im_pending_replies
+                .iter()
+                .any(|pending| pending.reply_id == reply_id && pending.task_id == task_id)
+        {
+            return;
+        }
+        const MAX_PENDING_REMOTE_IM_REPLIES: usize = 32;
+        if self.remote_im_pending_replies.len() >= MAX_PENDING_REMOTE_IM_REPLIES {
+            self.remote_im_pending_replies.pop_front();
+        }
+        self.remote_im_pending_replies
+            .push_back(PendingRemoteImReply {
+                committed_echo,
+                reply_id,
+                task_id,
+                source_routed,
+                bound_turn_id: None,
+            });
+    }
+
+    pub(super) fn bind_pending_remote_im_route_to_turn(&mut self, turn_id: &str) {
+        let pending_route = self
+            .remote_im_pending_replies
+            .iter_mut()
+            .find(|pending| pending.bound_turn_id.is_none())
+            .map(|pending| {
+                pending.bound_turn_id = Some(turn_id.to_string());
+                RemoteImTurnRoute {
+                    reply_id: pending.reply_id.clone(),
+                    task_id: pending.task_id.clone(),
+                    source_routed: pending.source_routed,
+                }
+            });
+        let active_route = || {
+            self.remote_im_active_reply_id
+                .as_ref()
+                .map(|reply_id| RemoteImTurnRoute {
+                    reply_id: reply_id.clone(),
+                    task_id: self.remote_im_active_task_id.clone(),
+                    source_routed: self.remote_im_forwarding_active,
+                })
+        };
+        if let Some(route) = pending_route.or_else(active_route) {
+            self.remember_remote_im_turn_route_if_absent(turn_id.to_string(), route);
+        }
+    }
+
+    pub(super) fn remember_remote_im_turn_route_if_absent(
+        &mut self,
+        turn_id: String,
+        route: RemoteImTurnRoute,
+    ) {
+        if self.remote_im_turn_routes.contains_key(&turn_id) {
+            return;
+        }
+
+        // Completed turns are removed immediately. The cap is defense in depth
+        // for malformed or partial notification streams that never complete.
+        const MAX_REMOTE_IM_TURN_ROUTES: usize = 64;
+        while self.remote_im_turn_routes.len() >= MAX_REMOTE_IM_TURN_ROUTES {
+            let Some(oldest_turn_id) = self.remote_im_turn_route_order.pop_front() else {
+                break;
+            };
+            self.remote_im_turn_routes.remove(&oldest_turn_id);
+        }
+        self.remote_im_turn_route_order.push_back(turn_id.clone());
+        self.remote_im_turn_routes.insert(turn_id, route);
+    }
+
+    pub(super) fn finish_remote_im_turn_route(&mut self, turn_id: &str) {
+        if self.remote_im_turn_routes.remove(turn_id).is_some()
+            && let Some(index) = self
+                .remote_im_turn_route_order
+                .iter()
+                .position(|candidate| candidate == turn_id)
+        {
+            self.remote_im_turn_route_order.remove(index);
+        }
+    }
+
+    pub(super) fn remote_im_route_for_turn(&self, turn_id: &str) -> Option<RemoteImTurnRoute> {
+        self.remote_im_turn_routes.get(turn_id).cloned()
+    }
+
+    pub(super) fn clear_active_remote_im_route_if_matches(&mut self, route: &RemoteImTurnRoute) {
+        if self.remote_im_active_reply_id.as_deref() == Some(route.reply_id.as_str())
+            && self.remote_im_active_task_id == route.task_id
+        {
+            self.remote_im_active_reply_id = None;
+            self.remote_im_active_task_id = None;
+        }
+    }
+
+    pub(super) fn submit_plain_user_message_with_remote_im_correlation(
+        &mut self,
+        user_message: UserMessage,
+    ) -> Option<AppCommand> {
+        let reply_id = crate::multi_ai_code_im_bridge::remote_im_reply_id(&user_message.text);
+        let task_id = crate::multi_ai_code_im_bridge::remote_im_task_id(&user_message.text);
+        let source_routed = reply_id.is_some();
+        self.set_remote_im_input_origin(source_routed);
+        let committed_echo = user_message_display_for_history(
+            user_message.clone(),
+            &UserMessageHistoryRecord::UserMessageText,
+        );
+        let (accepted, command) = self.submit_user_message_with_history_and_shell_escape_policy(
+            user_message,
+            UserMessageHistoryRecord::UserMessageText,
+            ShellEscapePolicy::Disallow,
+        );
+        self.remember_remote_im_reply(accepted, reply_id, task_id, source_routed, committed_echo);
+        command
+    }
+
+    pub(crate) fn submit_user_message_from_remote_im(
+        &mut self,
+        text: String,
+        display_text: String,
+        local_image_paths: Vec<PathBuf>,
+        remote_im_input: bool,
+        preserve_remote_im_route: bool,
+        reply_id: Option<String>,
+        task_id: Option<String>,
+    ) -> Result<(), String> {
+        if text.trim().is_empty() {
+            return Err("IM message is empty".to_string());
+        }
+        let reply_id =
+            reply_id.or_else(|| crate::multi_ai_code_im_bridge::remote_im_reply_id(&text));
+        let display_text = if display_text.trim().is_empty() {
+            text.clone()
+        } else {
+            display_text
+        };
+        let history_record = UserMessageHistoryRecord::Override(UserMessageHistoryOverride {
+            text: display_text,
+            text_elements: Vec::new(),
+        });
+        let suppress_committed_echo = !self.turn_lifecycle.agent_turn_running;
+        let user_message = create_initial_user_message(Some(text), local_image_paths, Vec::new())
+            .expect("non-empty source-submitted user message");
+        let committed_echo = user_message_display_for_history(
+            user_message.clone(),
+            &UserMessageHistoryRecord::UserMessageText,
+        );
+        let (accepted, _) = self.submit_user_message_with_history_and_shell_escape_policy(
+            user_message,
+            history_record,
+            ShellEscapePolicy::Disallow,
+        );
+        if accepted && !preserve_remote_im_route {
+            self.set_remote_im_input_origin(remote_im_input);
+        }
+        self.remember_remote_im_reply(
+            accepted,
+            reply_id,
+            task_id,
+            remote_im_input,
+            committed_echo.clone(),
+        );
+        if accepted && suppress_committed_echo {
+            const MAX_PENDING_REMOTE_IM_ECHOES: usize = 32;
+            if self.remote_im_pending_user_message_echoes.len() >= MAX_PENDING_REMOTE_IM_ECHOES {
+                self.remote_im_pending_user_message_echoes.pop_front();
+            }
+            self.remote_im_pending_user_message_echoes
+                .push_back(committed_echo);
+        }
+        accepted
+            .then_some(())
+            .ok_or_else(|| "Codex rejected the IM message".to_string())
+    }
+
     pub(crate) fn set_task_mentions_enabled(&mut self, enabled: bool) {
         self.bottom_pane.set_task_mentions_enabled(enabled);
     }
@@ -84,6 +313,7 @@ impl ChatWidget {
         user_message: UserMessage,
         history_record: UserMessageHistoryRecord,
     ) -> bool {
+        self.set_remote_im_input_origin(false);
         self.submit_user_message_with_history_and_shell_escape_policy(
             user_message,
             history_record,

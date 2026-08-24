@@ -185,6 +185,26 @@ impl ExecutorFileSystem for TestFileSystem {
 }
 
 #[tokio::test]
+async fn explicit_dangerous_exec_policy_bypass_is_preserved_in_layer_state() {
+    let tmp = tempdir().expect("tempdir");
+    let mut overrides = LoaderOverrides::without_managed_config_for_tests();
+    overrides.dangerously_bypass_exec_policy = true;
+
+    let stack = load_config_layers_state(
+        &TestFileSystem,
+        tmp.path(),
+        /*cwd*/ None,
+        &[],
+        overrides,
+        &crate::NoopThreadConfigLoader,
+    )
+    .await
+    .expect("load config layers");
+
+    assert!(stack.dangerously_bypass_exec_policy());
+}
+
+#[tokio::test]
 async fn packaged_defaults_have_lower_precedence_than_existing_config_layers() {
     let tmp = tempdir().expect("tempdir");
     let packaged_defaults_path =

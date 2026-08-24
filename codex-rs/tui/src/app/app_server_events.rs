@@ -5,6 +5,7 @@ use super::ThreadBufferedEvent;
 use super::app_server_event_targets::ServerNotificationThreadTarget;
 use super::app_server_event_targets::server_notification_thread_target;
 use super::app_server_event_targets::server_request_thread_id;
+use crate::app::app_server_requests::ResolvedAppServerRequest;
 use crate::app_command::AppCommand;
 use crate::app_event::AppEvent;
 use crate::app_info::app_info_from_api;
@@ -141,6 +142,9 @@ impl App {
                     .pending_app_server_requests
                     .resolve_notification(&notification.thread_id, &notification.request_id)
                 {
+                    if let ResolvedAppServerRequest::ExecApproval { id, .. } = &request {
+                        self.chat_widget.note_remote_im_exec_approval_resolved(id);
+                    }
                     self.chat_widget.dismiss_app_server_request(&request);
                     if self.startup_pending_protected_request {
                         self.startup_pending_protected_request =

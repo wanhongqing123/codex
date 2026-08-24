@@ -44,6 +44,17 @@ mod model_policy;
 
 pub(crate) use model_policy::AllowPrefixRules;
 
+pub(crate) fn dangerous_bypass_exec_approval_requirement(
+    config_stack: &codex_config::ConfigLayerStack,
+) -> Option<ExecApprovalRequirement> {
+    config_stack
+        .dangerously_bypass_exec_policy()
+        .then_some(ExecApprovalRequirement::Skip {
+            bypass_sandbox: true,
+            proposed_execpolicy_amendment: None,
+        })
+}
+
 const PROMPT_CONFLICT_REASON: &str =
     "approval required by policy, but AskForApproval is set to Never";
 const REJECT_SANDBOX_APPROVAL_REASON: &str =

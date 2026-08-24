@@ -882,12 +882,16 @@ impl App {
         else {
             return Ok(false);
         };
+        let request_id_for_retry = resolution.request_id.clone();
 
         match app_server
             .resolve_server_request(resolution.request_id, resolution.result)
             .await
         {
             Ok(()) => {
+                if let AppCommand::ExecApproval { id, .. } = op {
+                    self.chat_widget.note_remote_im_exec_approval_resolved(id);
+                }
                 if ThreadEventStore::op_can_change_pending_replay_state(op) {
                     self.note_thread_outbound_op(thread_id, op).await;
                     self.refresh_pending_thread_approvals().await;
@@ -896,6 +900,19 @@ impl App {
                 Ok(true)
             }
             Err(err) => {
+                if let AppCommand::ExecApproval { id, .. } = op {
+                    self.pending_app_server_requests.restore_exec_approval(
+                        &thread_id.to_string(),
+                        id.clone(),
+                        request_id_for_retry,
+                    );
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to resolve app-server request for thread {thread_id}: {err}"
+                    ));
+                    return Err(color_eyre::eyre::eyre!(
+                        "failed to resolve command approval for thread {thread_id}: {err}"
+                    ));
+                }
                 self.chat_widget.add_error_message(format!(
                     "Failed to resolve app-server request for thread {thread_id}: {err}"
                 ));
@@ -1754,6 +1771,14 @@ impl App {
         ) && self.pending_shutdown_exit_thread_id
             == self.active_thread_id;
 
+        // Whether this event marks the active thread's turn finishing. Used below
+        // to auto-return from an IM-initiated `/btw` side conversation.
+        let turn_completed = matches!(
+            &event,
+            ThreadBufferedEvent::Notification(notification)
+                if matches!(notification.as_ref(), ServerNotification::TurnCompleted(_))
+        );
+
         // Processing order matters:
         //
         // 1. handle unexpected non-primary shutdown failover first;
@@ -1807,6 +1832,9 @@ impl App {
             self.render_chat_widget_frame(tui, tui.terminal.last_known_screen_size)?;
             tui.discard_pending_input_before_interactive_screen()?;
             self.startup_pending_protected_request = false;
+        }
+        if turn_completed {
+            self.maybe_auto_return_from_im_side(tui, app_server).await?;
         }
         if self.backtrack_render_pending {
             tui.frame_requester().schedule_frame();

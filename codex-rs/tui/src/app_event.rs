@@ -59,6 +59,7 @@ use codex_config::types::ApprovalsReviewer;
 use codex_features::Feature;
 use codex_plugin::PluginCapabilitySummary;
 use codex_protocol::config_types::CollaborationModeMask;
+use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Personality;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -245,6 +246,9 @@ pub(crate) enum AppEvent {
     /// Fork the current thread into a transient side conversation.
     StartSide {
         parent_thread_id: ThreadId,
+        /// When true, auto-return to the parent thread once this side thread's
+        /// turn completes (IM-initiated `/btw`, which has no interactive Ctrl+C).
+        auto_return_on_turn_complete: bool,
         user_message: Option<UserMessage>,
     },
 
@@ -377,6 +381,88 @@ pub(crate) enum AppEvent {
 
     /// Open the resume picker inside the running TUI session.
     OpenResumePicker,
+
+    /// Switch Codex collaboration mode from the Multi-AI Code IM control channel.
+    /// `request_id` (when present) is echoed back via a `control_result` line so
+    /// the host reports the real outcome instead of assuming success.
+    MultiAiCodeImSwitchMode {
+        mode: ModeKind,
+        request_id: Option<String>,
+    },
+
+    /// Return the current Codex `/status` output to the Multi-AI Code IM control channel.
+    MultiAiCodeImStatus {
+        request_id: String,
+    },
+
+    /// List or switch Codex models from the Multi-AI Code IM control channel.
+    MultiAiCodeImModel {
+        request_id: String,
+        model: Option<String>,
+        reasoning: Option<String>,
+    },
+
+    /// Read or manage the current thread goal from the Multi-AI Code IM control channel.
+    MultiAiCodeImGoal {
+        request_id: String,
+        goal: Option<String>,
+    },
+
+    /// Start a Codex side task from the Multi-AI Code IM control channel.
+    MultiAiCodeImBtw {
+        request_id: String,
+        task: String,
+        reply_id: Option<String>,
+        task_id: Option<String>,
+    },
+
+    /// Submit a normal user message from the Multi-AI Code IM control channel.
+    MultiAiCodeImSubmitUserMessage {
+        request_id: String,
+        text: String,
+        display_text: String,
+        local_image_paths: Vec<std::path::PathBuf>,
+        remote_im_input: bool,
+        preserve_remote_im_route: bool,
+        reply_id: Option<String>,
+        task_id: Option<String>,
+    },
+
+    /// Interrupt the active Codex turn from the Multi-AI Code IM control channel.
+    MultiAiCodeImInterrupt {
+        request_id: String,
+    },
+
+    /// Compact the active Codex thread context from the Multi-AI Code IM control channel.
+    MultiAiCodeImCompact {
+        request_id: String,
+    },
+
+    /// Clear the active Codex thread and start a fresh session from the Multi-AI Code IM control channel.
+    MultiAiCodeImClear {
+        request_id: String,
+    },
+
+    /// Resolve a pending command-execution approval from the Multi-AI Code IM channel.
+    /// The string fields are validated on the app thread so malformed or stale remote
+    /// responses receive an explicit `control_result` instead of silently timing out.
+    MultiAiCodeImResolveApproval {
+        request_id: String,
+        thread_id: String,
+        turn_id: String,
+        task_id: String,
+        approval_id: String,
+        decision: String,
+    },
+
+    /// Update the terminal default fg/bg (light/dark) at runtime from the host,
+    /// so the TUI repaints in the new theme without a session restart.
+    /// `fg` is derived from `bg` when absent. `request_id` optional (fire-and-forget).
+    MultiAiCodeImTheme {
+        request_id: Option<String>,
+        bg: (u8, u8, u8),
+        fg: Option<(u8, u8, u8)>,
+    },
 
     /// Open the Claude Code migration picker inside the running TUI session.
     OpenExternalAgentConfigMigration,

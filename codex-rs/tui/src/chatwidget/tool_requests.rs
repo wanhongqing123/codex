@@ -7,11 +7,172 @@ use super::*;
 
 impl ChatWidget {
     pub(super) fn on_exec_approval_request(&mut self, _id: String, ev: ExecApprovalRequestEvent) {
+        if self.forward_exec_approval_to_remote_im(&ev) {
+            return;
+        }
         self.defer_or_handle(
             ev,
             InterruptManager::push_exec_approval,
             Self::handle_exec_approval_now,
         );
+    }
+
+    /// Returns true when remote delivery failed and the request was canceled
+    /// fail-closed, in which case no local overlay should be installed.
+    fn forward_exec_approval_to_remote_im(&mut self, ev: &ExecApprovalRequestEvent) -> bool {
+        // An immutable turn route remains available until terminal cleanup so
+        // output cannot be reassigned to another peer. It must not, however,
+        // preserve approval authority after local TUI input has taken over.
+        if !self.remote_im_forwarding_active {
+            return false;
+        }
+        // Never route a security decision through the mutable "active" task.
+        // A later prompt can arrive while this turn is blocked on approval, so
+        // the immutable turn route is the authority-bearing correlation.
+        let Some(route) = self.remote_im_turn_routes.get(&ev.turn_id).cloned() else {
+            return false;
+        };
+        if !route.source_routed {
+            return false;
+        }
+        let Some(task_id) = route.task_id.clone() else {
+            return false;
+        };
+        let Some(thread_id) = self.thread_id else {
+            return false;
+        };
+        let approval_id = ev.effective_approval_id();
+        let pending = RemoteImPendingExecApproval {
+            thread_id,
+            turn_id: ev.turn_id.clone(),
+            available_decisions: ev.effective_available_decisions(),
+            reply_id: Some(route.reply_id.clone()),
+            task_id: task_id.clone(),
+        };
+        // Register before handing the event to the async bridge. A fast IM reply
+        // must never race ahead of the allow-list used to validate its decision.
+        self.remote_im_pending_exec_approvals
+            .insert(approval_id.clone(), pending);
+        match crate::multi_ai_code_im_bridge::send_approval_request(
+            thread_id,
+            ev,
+            Some(route.reply_id.as_str()),
+            Some(&task_id),
+        ) {
+            crate::multi_ai_code_im_bridge::ReliableSendOutcome::Queued => return false,
+            crate::multi_ai_code_im_bridge::ReliableSendOutcome::Unavailable => {
+                tracing::warn!(
+                    %thread_id,
+                    turn_id = %ev.turn_id,
+                    %task_id,
+                    %approval_id,
+                    "remote IM approval bridge is unavailable; keeping approval local"
+                );
+                return false;
+            }
+            crate::multi_ai_code_im_bridge::ReliableSendOutcome::Saturated => {}
+        }
+
+        self.remote_im_pending_exec_approvals.remove(&approval_id);
+        tracing::error!(
+            %thread_id,
+            turn_id = %ev.turn_id,
+            %task_id,
+            %approval_id,
+            "remote IM approval queue is saturated; canceling command execution fail-closed"
+        );
+        self.add_error_message(
+            "远程审批消息无法可靠入队；为安全起见已自动取消本次命令。".to_string(),
+        );
+        self.app_event_tx.send(AppEvent::SubmitThreadOp {
+            thread_id,
+            op: AppCommand::exec_approval(
+                approval_id,
+                Some(ev.turn_id.clone()),
+                CommandExecutionApprovalDecision::Cancel,
+            ),
+        });
+        true
+    }
+
+    pub(crate) fn validate_remote_im_exec_approval(
+        &self,
+        thread_id: ThreadId,
+        turn_id: &str,
+        task_id: &str,
+        approval_id: &str,
+        decision: &CommandExecutionApprovalDecision,
+    ) -> Result<(), String> {
+        let Some(pending) = self.remote_im_pending_exec_approvals.get(approval_id) else {
+            return Err("approval is no longer pending".to_string());
+        };
+        if pending.thread_id != thread_id {
+            return Err("approval belongs to a different Codex thread".to_string());
+        }
+        if pending.turn_id != turn_id {
+            return Err("approval belongs to a different Codex turn".to_string());
+        }
+        if pending.task_id != task_id {
+            return Err("approval belongs to a different remote IM task".to_string());
+        }
+        if !pending.available_decisions.contains(decision) {
+            return Err("approval decision is not available for this request".to_string());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn remote_im_exec_approval_decision(
+        &self,
+        approval_id: &str,
+        decision: &str,
+    ) -> Result<CommandExecutionApprovalDecision, String> {
+        let Some(pending) = self.remote_im_pending_exec_approvals.get(approval_id) else {
+            return Err("approval is no longer pending".to_string());
+        };
+        let selected = pending
+            .available_decisions
+            .iter()
+            .find(|candidate| match decision {
+                "accept" => matches!(candidate, CommandExecutionApprovalDecision::Accept),
+                "accept-persistent" => matches!(
+                    candidate,
+                    CommandExecutionApprovalDecision::AcceptWithExecpolicyAmendment { .. }
+                ),
+                "cancel" => matches!(candidate, CommandExecutionApprovalDecision::Cancel),
+                _ => false,
+            });
+        selected
+            .cloned()
+            .ok_or_else(|| "approval decision is not available for this request".to_string())
+    }
+
+    pub(crate) fn note_remote_im_exec_approval_resolved(&mut self, approval_id: &str) {
+        let Some(pending) = self.remote_im_pending_exec_approvals.remove(approval_id) else {
+            return;
+        };
+        crate::multi_ai_code_im_bridge::send_approval_resolved(
+            pending.thread_id,
+            &pending.turn_id,
+            approval_id,
+            pending.reply_id.as_deref(),
+            Some(&pending.task_id),
+        );
+    }
+
+    pub(crate) fn invalidate_remote_im_exec_approvals(&mut self) {
+        // A thread switch destroys the local approval authority. Tell the host
+        // immediately so its one-time IM tokens do not remain clickable until
+        // their ten-minute timeout.
+        let pending = std::mem::take(&mut self.remote_im_pending_exec_approvals);
+        for (approval_id, approval) in pending {
+            crate::multi_ai_code_im_bridge::send_approval_resolved(
+                approval.thread_id,
+                &approval.turn_id,
+                &approval_id,
+                approval.reply_id.as_deref(),
+                Some(&approval.task_id),
+            );
+        }
     }
 
     pub(crate) fn on_apply_patch_approval_request(

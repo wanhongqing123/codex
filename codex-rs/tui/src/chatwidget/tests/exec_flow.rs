@@ -434,6 +434,7 @@ async fn exec_approval_emits_proposed_command_and_decision_history() {
         approval_id: Some("call-short".into()),
         turn_id: "turn-short".into(),
         environment_id: None,
+        raw_command: None,
         command: vec!["bash".into(), "-lc".into(), "echo hello world".into()],
         cwd: AbsolutePathBuf::current_dir().expect("current dir"),
         reason: Some(
@@ -479,6 +480,8 @@ async fn exec_approval_emits_proposed_command_and_decision_history() {
 #[test]
 fn app_server_exec_approval_request_splits_shell_wrapped_command() {
     let script = r#"python3 -c 'print("Hello, world!")'"#;
+    let raw_command =
+        shlex::try_join(["/bin/zsh", "-lc", script]).expect("round-trippable shell wrapper");
     let request = exec_approval_request_from_params(
         AppServerCommandExecutionRequestApprovalParams {
             thread_id: "thread-1".to_string(),
@@ -489,10 +492,7 @@ fn app_server_exec_approval_request_splits_shell_wrapped_command() {
             environment_id: None,
             reason: None,
             network_approval_context: None,
-            command: Some(
-                shlex::try_join(["/bin/zsh", "-lc", script])
-                    .expect("round-trippable shell wrapper"),
-            ),
+            command: Some(raw_command.clone()),
             cwd: Some(test_path_buf("/tmp").abs().into()),
             command_actions: None,
             additional_permissions: None,
@@ -511,6 +511,7 @@ fn app_server_exec_approval_request_splits_shell_wrapped_command() {
             script.to_string(),
         ]
     );
+    assert_eq!(request.raw_command.as_deref(), Some(raw_command.as_str()));
 }
 
 #[tokio::test]
@@ -525,6 +526,7 @@ async fn exec_approval_uses_approval_id_when_present() {
             approval_id: Some("approval-subcommand".into()),
             turn_id: "turn-short".into(),
             environment_id: None,
+            raw_command: None,
             command: vec!["bash".into(), "-lc".into(), "echo hello world".into()],
             cwd: AbsolutePathBuf::current_dir().expect("current dir"),
             reason: Some(
@@ -569,6 +571,7 @@ async fn exec_approval_decision_truncates_multiline_and_long_commands() {
         approval_id: Some("call-multi".into()),
         turn_id: "turn-multi".into(),
         environment_id: None,
+        raw_command: None,
         command: vec!["bash".into(), "-lc".into(), "echo line1\necho line2".into()],
         cwd: AbsolutePathBuf::current_dir().expect("current dir"),
         reason: Some(
@@ -623,6 +626,7 @@ async fn exec_approval_decision_truncates_multiline_and_long_commands() {
         approval_id: Some("call-long".into()),
         turn_id: "turn-long".into(),
         environment_id: None,
+        raw_command: None,
         command: vec!["bash".into(), "-lc".into(), long],
         cwd: AbsolutePathBuf::current_dir().expect("current dir"),
         reason: None,
@@ -1555,6 +1559,7 @@ async fn approval_modal_exec_snapshot() -> anyhow::Result<()> {
         approval_id: Some("call-approve-cmd".into()),
         turn_id: "turn-approve-cmd".into(),
         environment_id: None,
+        raw_command: None,
         command: vec!["bash".into(), "-lc".into(), "echo hello world".into()],
         cwd: AbsolutePathBuf::current_dir().expect("current dir"),
         reason: Some(
@@ -1613,6 +1618,7 @@ async fn approval_modal_exec_without_reason_snapshot() -> anyhow::Result<()> {
         approval_id: Some("call-approve-cmd-noreason".into()),
         turn_id: "turn-approve-cmd-noreason".into(),
         environment_id: None,
+        raw_command: None,
         command: vec!["bash".into(), "-lc".into(), "echo hello world".into()],
         cwd: AbsolutePathBuf::current_dir().expect("current dir"),
         reason: None,
@@ -1659,6 +1665,7 @@ async fn approval_modal_exec_multiline_prefix_hides_execpolicy_option_snapshot()
         approval_id: Some("call-approve-cmd-multiline-trunc".into()),
         turn_id: "turn-approve-cmd-multiline-trunc".into(),
         environment_id: None,
+        raw_command: None,
         command: command.clone(),
         cwd: AbsolutePathBuf::current_dir().expect("current dir"),
         reason: None,

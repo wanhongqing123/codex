@@ -665,6 +665,119 @@ async fn live_app_server_turn_completed_clears_working_status_after_answer_item(
 }
 
 #[tokio::test]
+async fn in_progress_turn_completed_notification_keeps_remote_im_reply_correlation() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.remote_im_active_reply_id = Some("rim-still-running".to_string());
+
+    chat.handle_server_notification(
+        ServerNotification::TurnCompleted(TurnCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn: AppServerTurn {
+                id: "turn-1".to_string(),
+                items_view: codex_app_server_protocol::TurnItemsView::Summary,
+                items: Vec::new(),
+                status: AppServerTurnStatus::InProgress,
+                error: None,
+                started_at: Some(0),
+                completed_at: None,
+                duration_ms: None,
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    assert_eq!(
+        chat.remote_im_active_reply_id.as_deref(),
+        Some("rim-still-running")
+    );
+}
+
+#[tokio::test]
+async fn active_goal_turn_completion_keeps_remote_im_task_correlation() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.remote_im_active_reply_id = Some("rim-goal-running".to_string());
+    chat.remote_im_active_task_id = Some("task-goal-running".to_string());
+    chat.current_goal_status = Some(GoalStatusState::new(
+        codex_app_server_protocol::ThreadGoal {
+            thread_id: "thread-1".to_string(),
+            objective: "Finish the remote task".to_string(),
+            status: codex_app_server_protocol::ThreadGoalStatus::Active,
+            token_budget: None,
+            tokens_used: 100,
+            time_used_seconds: 60,
+            created_at: 0,
+            updated_at: 0,
+        },
+        std::time::Instant::now(),
+    ));
+
+    chat.handle_server_notification(
+        ServerNotification::TurnCompleted(TurnCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn: AppServerTurn {
+                id: "turn-goal-1".to_string(),
+                items_view: codex_app_server_protocol::TurnItemsView::Summary,
+                items: vec![AppServerThreadItem::AgentMessage {
+                    id: "msg-goal-progress".to_string(),
+                    text: "Finished one step and continuing.".to_string(),
+                    phase: Some(MessagePhase::FinalAnswer),
+                    memory_citation: None,
+                    delivery: None,
+                }],
+                status: AppServerTurnStatus::Completed,
+                error: None,
+                started_at: Some(0),
+                completed_at: Some(1),
+                duration_ms: Some(1),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    assert_eq!(
+        chat.remote_im_active_reply_id.as_deref(),
+        Some("rim-goal-running")
+    );
+    assert_eq!(
+        chat.remote_im_active_task_id.as_deref(),
+        Some("task-goal-running")
+    );
+}
+
+#[tokio::test]
+async fn failed_turn_without_error_clears_remote_im_reply_correlation() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.remote_im_active_reply_id = Some("rim-failed-without-error".to_string());
+    chat.remember_remote_im_turn_route_if_absent(
+        "turn-1".to_string(),
+        RemoteImTurnRoute {
+            reply_id: "rim-failed-without-error".to_string(),
+            task_id: None,
+            source_routed: false,
+        },
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::TurnCompleted(TurnCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn: AppServerTurn {
+                id: "turn-1".to_string(),
+                items_view: codex_app_server_protocol::TurnItemsView::Summary,
+                items: Vec::new(),
+                status: AppServerTurnStatus::Failed,
+                error: None,
+                started_at: Some(0),
+                completed_at: Some(1),
+                duration_ms: Some(1),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    assert!(chat.remote_im_active_reply_id.is_none());
+}
+
+#[tokio::test]
 async fn live_app_server_turn_started_sets_feedback_turn_id() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 

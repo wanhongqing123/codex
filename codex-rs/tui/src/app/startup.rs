@@ -528,6 +528,7 @@ See the Codex keymap documentation for supported actions and examples."
             pending_plugin_enabled_writes: HashMap::new(),
             pending_hook_enabled_writes: HashMap::new(),
         };
+        crate::multi_ai_code_im_bridge::start_control_listener(app.app_event_tx.clone());
         if start_in_agents_overview {
             app.open_agents_overview(&app_server);
         }

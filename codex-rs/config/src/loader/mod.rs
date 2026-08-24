@@ -187,6 +187,7 @@ pub async fn load_config_layers_state(
     let ignore_project_config = overrides.ignore_project_config;
     let ignore_user_and_project_exec_policy_rules =
         overrides.ignore_user_and_project_exec_policy_rules;
+    let dangerously_bypass_exec_policy = overrides.dangerously_bypass_exec_policy;
     let mut requirements_layers = Vec::new();
     let mut bundle_requirements_layers = Vec::new();
     let mut system_requirements_layer = None;
@@ -506,7 +507,8 @@ pub async fn load_config_layers_state(
         config_requirements_toml.clone().try_into()?,
         config_requirements_toml.into_toml(),
     )?
-    .with_user_and_project_exec_policy_rules_ignored(ignore_user_and_project_exec_policy_rules);
+    .with_user_and_project_exec_policy_rules_ignored(ignore_user_and_project_exec_policy_rules)
+    .with_dangerous_exec_policy_bypass(dangerously_bypass_exec_policy);
     Ok(match startup_warnings {
         Some(startup_warnings) => config_layer_stack.with_startup_warnings(startup_warnings),
         None => config_layer_stack,

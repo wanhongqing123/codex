@@ -122,6 +122,7 @@ async fn misalignment_policy_blocks_queued_turns_and_goal_resumption() -> Result
         },
         AppEvent::StartSide {
             parent_thread_id: thread_id,
+            auto_return_on_turn_complete: false,
             user_message: Some("Do not fork this stopped thread".into()),
         },
         AppEvent::ForkCurrentSession { name: None },

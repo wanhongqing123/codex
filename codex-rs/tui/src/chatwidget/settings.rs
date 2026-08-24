@@ -638,6 +638,240 @@ impl ChatWidget {
         }
     }
 
+    pub(crate) fn switch_collaboration_mode_from_remote_im(
+        &mut self,
+        kind: ModeKind,
+    ) -> Result<(), String> {
+        // Mirror the local guard in `submit_user_message_with_mode`: switching
+        // the collaboration mask mid-turn is not supported for local input, so
+        // remote IM input must not bypass it either.
+        if self.turn_lifecycle.agent_turn_running {
+            let message = "Cannot switch collaboration mode while a turn is running.".to_string();
+            self.add_info_message(message.clone(), /*hint*/ None);
+            return Err(message);
+        }
+
+        if !self.collaboration_modes_enabled() {
+            let message = "Collaboration modes are disabled.".to_string();
+            self.add_info_message(
+                message.clone(),
+                Some("Enable collaboration modes before switching from IM.".to_string()),
+            );
+            return Err(message);
+        }
+
+        if let Some(mask) = collaboration_modes::mask_for_kind(self.model_catalog.as_ref(), kind) {
+            self.set_collaboration_mask_from_user_action(mask);
+            Ok(())
+        } else {
+            let message = format!("{} mode unavailable right now.", kind.display_name());
+            self.add_info_message(message.clone(), /*hint*/ None);
+            Err(message)
+        }
+    }
+
+    pub(crate) fn model_control_output_from_remote_im(
+        &mut self,
+        selection: Option<&str>,
+        reasoning: Option<&str>,
+    ) -> Result<(String, Option<String>, Option<ReasoningEffortConfig>), String> {
+        let current_model = self.current_model().to_string();
+        let mut models = self
+            .model_catalog
+            .try_list_models()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|preset| preset.show_in_picker)
+            .collect::<Vec<_>>();
+        models.sort_by(|left, right| {
+            left.display_name
+                .cmp(&right.display_name)
+                .then_with(|| left.model.cmp(&right.model))
+        });
+
+        if let Some(reasoning) = reasoning.map(str::trim).filter(|value| !value.is_empty()) {
+            if self.turn_lifecycle.agent_turn_running {
+                let message = "Cannot switch reasoning while a turn is running.".to_string();
+                self.add_info_message(message.clone(), /*hint*/ None);
+                return Err(message);
+            }
+
+            let selected_reasoning = Self::parse_remote_im_reasoning_effort(reasoning)?;
+            if self.effective_reasoning_effort() == Some(selected_reasoning.clone()) {
+                return Ok((
+                    format!(
+                        "当前已经是推理档位：{}",
+                        Self::remote_im_reasoning_effort_label(&selected_reasoning)
+                    ),
+                    None,
+                    None,
+                ));
+            }
+
+            self.set_reasoning_effort(Some(selected_reasoning.clone()));
+            return Ok((
+                format!(
+                    "已切换推理档位：{}",
+                    Self::remote_im_reasoning_effort_label(&selected_reasoning)
+                ),
+                None,
+                Some(selected_reasoning),
+            ));
+        }
+
+        let Some(selection) = selection.map(str::trim).filter(|value| !value.is_empty()) else {
+            return Ok((
+                Self::format_remote_im_model_list(&current_model, &models),
+                None,
+                None,
+            ));
+        };
+
+        if self.turn_lifecycle.agent_turn_running {
+            let message = "Cannot switch model while a turn is running.".to_string();
+            self.add_info_message(message.clone(), /*hint*/ None);
+            return Err(message);
+        }
+
+        let selected_model = if let Ok(index) = selection.parse::<usize>() {
+            if index == 0 || index > models.len() {
+                return Ok((
+                    format!(
+                        "未找到序号 {selection} 对应的模型。\n\n{}",
+                        Self::format_remote_im_model_list(&current_model, &models)
+                    ),
+                    None,
+                    None,
+                ));
+            }
+            models[index - 1].model.clone()
+        } else {
+            let exact_matches = models
+                .iter()
+                .filter(|preset| {
+                    preset.model == selection
+                        || preset.id == selection
+                        || preset.display_name.eq_ignore_ascii_case(selection)
+                })
+                .collect::<Vec<_>>();
+            match exact_matches.as_slice() {
+                [preset] => preset.model.clone(),
+                [] => {
+                    return Ok((
+                        format!(
+                            "未找到模型：{selection}\n\n{}",
+                            Self::format_remote_im_model_list(&current_model, &models)
+                        ),
+                        None,
+                        None,
+                    ));
+                }
+                matches => {
+                    let choices = matches
+                        .iter()
+                        .map(|preset| format!("- {} ({})", preset.display_name, preset.model))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    return Ok((
+                        format!("模型名不唯一，请使用完整模型 ID：\n{choices}"),
+                        None,
+                        None,
+                    ));
+                }
+            }
+        };
+
+        if selected_model == current_model {
+            return Ok((format!("当前已经是模型：{selected_model}"), None, None));
+        }
+
+        self.set_model(&selected_model);
+        Ok((
+            format!("已切换模型：{selected_model}"),
+            Some(selected_model),
+            None,
+        ))
+    }
+
+    fn format_remote_im_model_list(current_model: &str, models: &[ModelPreset]) -> String {
+        let mut lines = vec![format!("当前模型：{current_model}")];
+        if models.is_empty() {
+            lines.push("模型列表暂不可用。".to_string());
+            lines.push(String::new());
+            lines.extend(Self::format_remote_im_reasoning_help_lines());
+            return lines.join("\n");
+        }
+
+        lines.push("可用模型：".to_string());
+        for (index, preset) in models.iter().enumerate() {
+            let current_marker = if preset.model == current_model {
+                "（当前）"
+            } else {
+                ""
+            };
+            lines.push(format!(
+                "{}. {}{}",
+                index + 1,
+                preset.display_name,
+                current_marker
+            ));
+            lines.push(format!("   ID: {}", preset.model));
+            if preset.id != preset.model {
+                lines.push(format!("   别名: {}", preset.id));
+            }
+        }
+        lines.push(String::new());
+        lines.extend(Self::format_remote_im_reasoning_help_lines());
+        lines.push("用法：".to_string());
+        lines.push("- /model <序号或模型ID>".to_string());
+        lines.push("- /model reasoning <low|medium|high|xhigh|max|ultra>".to_string());
+        lines.join("\n")
+    }
+
+    fn format_remote_im_reasoning_help_lines() -> Vec<String> {
+        vec![
+            "推理档位：".to_string(),
+            "- low: Low - Fast responses with lighter reasoning".to_string(),
+            "- medium: Medium - Balances speed and reasoning depth for everyday tasks".to_string(),
+            "- high: High - Greater reasoning depth for complex problems".to_string(),
+            "- xhigh: Extra high - Extra high reasoning depth for complex problems".to_string(),
+            "- max: Max - Maximum reasoning depth for the hardest problems".to_string(),
+            "- ultra: Ultra - Maximum reasoning with automatic task delegation".to_string(),
+        ]
+    }
+
+    fn parse_remote_im_reasoning_effort(value: &str) -> Result<ReasoningEffortConfig, String> {
+        let normalized = value
+            .trim()
+            .to_ascii_lowercase()
+            .replace([' ', '-', '_'], "");
+        match normalized.as_str() {
+            "low" => Ok(ReasoningEffortConfig::Low),
+            "medium" | "med" => Ok(ReasoningEffortConfig::Medium),
+            "high" => Ok(ReasoningEffortConfig::High),
+            "extrahigh" | "xhigh" => Ok(ReasoningEffortConfig::XHigh),
+            "max" => Ok(ReasoningEffortConfig::Max),
+            "ultra" => Ok(ReasoningEffortConfig::Ultra),
+            _ => Err(format!(
+                "未知推理档位：{value}\n用法：/model reasoning <low|medium|high|xhigh|max|ultra>"
+            )),
+        }
+    }
+
+    fn remote_im_reasoning_effort_label(effort: &ReasoningEffortConfig) -> String {
+        match effort {
+            ReasoningEffortConfig::None => "None".to_string(),
+            ReasoningEffortConfig::Minimal => "Minimal".to_string(),
+            ReasoningEffortConfig::Low => "Low".to_string(),
+            ReasoningEffortConfig::Medium => "Medium".to_string(),
+            ReasoningEffortConfig::High => "High".to_string(),
+            ReasoningEffortConfig::XHigh => "Extra high".to_string(),
+            ReasoningEffortConfig::Max => "Max".to_string(),
+            ReasoningEffortConfig::Ultra => "Ultra".to_string(),
+            ReasoningEffortConfig::Custom(value) => value.clone(),
+        }
+    }
+
     pub(crate) fn set_collaboration_mask_from_user_action(&mut self, mask: CollaborationModeMask) {
         self.set_collaboration_mask(mask);
         self.submit_collaboration_mode_settings_update();

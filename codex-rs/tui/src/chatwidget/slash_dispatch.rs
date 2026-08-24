@@ -38,6 +38,15 @@ const GOAL_USAGE_HINT: &str = "Example: /goal improve benchmark coverage";
 const RAW_USAGE: &str = "Usage: /raw [on|off]";
 const USAGE_CHATGPT_LOGIN_REQUIRED: &str = "Sign in with ChatGPT to use /usage.";
 
+fn build_remote_im_btw_task(task: &str, reply_id: &str, task_id: Option<&str>) -> String {
+    let task_marker = task_id
+        .map(|task_id| format!("\nTask marker: <remote-im-task id=\"{task_id}\">"))
+        .unwrap_or_default();
+    format!(
+        "{task}\n\n[IM_REPLY] Put final Markdown for IM between these exact markers, each on its own line in your reply:\nOpening marker: <remote-im-reply id=\"{reply_id}\">{task_marker}\nClosing marker: </remote-im-reply id=\"{reply_id}\">\nText outside markers is ignored."
+    )
+}
+
 impl ChatWidget {
     /// Dispatch a bare slash command and record its staged local-history entry.
     ///
@@ -104,12 +113,14 @@ impl ChatWidget {
     fn request_side_conversation(
         &mut self,
         parent_thread_id: ThreadId,
+        auto_return_on_turn_complete: bool,
         user_message: Option<UserMessage>,
     ) {
         self.set_side_conversation_context_label(Some(SIDE_STARTING_CONTEXT_LABEL.to_string()));
         self.request_redraw();
         self.app_event_tx.send(AppEvent::StartSide {
             parent_thread_id,
+            auto_return_on_turn_complete,
             user_message,
         });
     }
@@ -123,7 +134,50 @@ impl ChatWidget {
             return;
         };
 
-        self.request_side_conversation(parent_thread_id, /*user_message*/ None);
+        self.request_side_conversation(
+            parent_thread_id,
+            /*auto_return_on_turn_complete*/ false,
+            /*user_message*/ None,
+        );
+    }
+
+    pub(crate) fn submit_btw_from_remote_im(
+        &mut self,
+        task: String,
+        reply_id: Option<String>,
+        task_id: Option<String>,
+    ) -> Result<(), String> {
+        let task = task.trim();
+        if task.is_empty() {
+            return Err("用法：/btw <任务>".to_string());
+        }
+
+        if !self.ensure_side_command_allowed_outside_review(SlashCommand::Btw) {
+            return Err("'/btw' is unavailable while code review is running.".to_string());
+        }
+
+        let Some(parent_thread_id) = self.thread_id else {
+            return Err("'/btw' is unavailable before the session starts.".to_string());
+        };
+
+        let task = match reply_id.filter(|id| !id.trim().is_empty()) {
+            Some(reply_id) => build_remote_im_btw_task(
+                task,
+                reply_id.trim(),
+                task_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty()),
+            ),
+            None => task.to_string(),
+        };
+
+        self.request_side_conversation(
+            parent_thread_id,
+            /*auto_return_on_turn_complete*/ true,
+            Some(UserMessage::from(task)),
+        );
+        Ok(())
     }
 
     fn emit_raw_output_mode_changed(&self, enabled: bool) {
@@ -944,7 +998,11 @@ impl ChatWidget {
                     mention_bindings,
                     source,
                 );
-                self.request_side_conversation(parent_thread_id, Some(user_message));
+                self.request_side_conversation(
+                    parent_thread_id,
+                    /*auto_return_on_turn_complete*/ false,
+                    Some(user_message),
+                );
             }
             SlashCommand::Review if !trimmed.is_empty() => {
                 self.submit_op(AppCommand::review(ReviewTarget::Custom {

@@ -14,6 +14,7 @@ async fn exec_approval_emits_proposed_command_and_decision_history() {
         approval_id: Some("call-short".into()),
         turn_id: "turn-short".into(),
         environment_id: Some("remote".to_string()),
+        raw_command: None,
         command: vec!["bash".into(), "-lc".into(), "echo hello world".into()],
         cwd: AbsolutePathBuf::current_dir().expect("current dir"),
         reason: Some(
@@ -337,6 +338,7 @@ async fn exec_approval_uses_approval_id_when_present() {
             approval_id: Some("approval-subcommand".into()),
             turn_id: "turn-short".into(),
             environment_id: None,
+            raw_command: None,
             command: vec!["bash".into(), "-lc".into(), "echo hello world".into()],
             cwd: AbsolutePathBuf::current_dir().expect("current dir"),
             reason: Some(
@@ -372,6 +374,337 @@ async fn exec_approval_uses_approval_id_when_present() {
 }
 
 #[tokio::test]
+async fn remote_im_exec_approval_requires_task_identity_and_validates_decision() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    chat.remote_im_forwarding_active = true;
+    let persistent_decision =
+        codex_app_server_protocol::CommandExecutionApprovalDecision::AcceptWithExecpolicyAmendment {
+            execpolicy_amendment: codex_app_server_protocol::ExecPolicyAmendment {
+                command: vec!["Remove-Item".into(), "-Force".into()],
+            },
+        };
+    let display = |message: &str| UserMessageDisplay {
+        message: message.to_string(),
+        remote_image_urls: Vec::new(),
+        local_images: Vec::new(),
+        text_elements: Vec::new(),
+    };
+    chat.remote_im_pending_replies
+        .push_back(PendingRemoteImReply {
+            committed_echo: display("A"),
+            reply_id: "reply-a".to_string(),
+            task_id: Some("task-a".to_string()),
+            source_routed: true,
+            bound_turn_id: None,
+        });
+    chat.remote_im_pending_replies
+        .push_back(PendingRemoteImReply {
+            committed_echo: display("B"),
+            reply_id: "reply-b".to_string(),
+            task_id: Some("task-b".to_string()),
+            source_routed: true,
+            bound_turn_id: None,
+        });
+    // TurnStarted for A binds the oldest submitted-but-uncommitted route.
+    chat.bind_pending_remote_im_route_to_turn("turn-1");
+    // A second TurnStarted can precede both committed echoes; it must consume
+    // B's unbound entry instead of binding A twice.
+    chat.bind_pending_remote_im_route_to_turn("turn-2");
+    assert_eq!(
+        chat.remote_im_route_for_turn("turn-1"),
+        Some(RemoteImTurnRoute {
+            reply_id: "reply-a".to_string(),
+            task_id: Some("task-a".to_string()),
+            source_routed: true,
+        })
+    );
+    assert_eq!(
+        chat.remote_im_route_for_turn("turn-2"),
+        Some(RemoteImTurnRoute {
+            reply_id: "reply-b".to_string(),
+            task_id: Some("task-b".to_string()),
+            source_routed: true,
+        })
+    );
+    // A later remote prompt must not steal turn A's security approval.
+    chat.remote_im_active_reply_id = Some("reply-b".to_string());
+    chat.remote_im_active_task_id = Some("task-b".to_string());
+
+    handle_exec_approval_request(
+        &mut chat,
+        "request-1",
+        ExecApprovalRequestEvent {
+            call_id: "item-1".into(),
+            approval_id: Some("approval-1".into()),
+            turn_id: "turn-1".into(),
+            environment_id: None,
+            raw_command: None,
+            command: vec!["powershell".into(), "Remove-Item -Force target".into()],
+            cwd: AbsolutePathBuf::current_dir().expect("current dir"),
+            reason: Some("dangerous command".into()),
+            network_approval_context: None,
+            proposed_execpolicy_amendment: Some(codex_app_server_protocol::ExecPolicyAmendment {
+                command: vec!["Remove-Item".into(), "-Force".into()],
+            }),
+            proposed_network_policy_amendments: None,
+            additional_permissions: None,
+            available_decisions: Some(vec![
+                codex_app_server_protocol::CommandExecutionApprovalDecision::Accept,
+                persistent_decision.clone(),
+                codex_app_server_protocol::CommandExecutionApprovalDecision::Cancel,
+            ]),
+        },
+    );
+
+    assert_eq!(
+        chat.remote_im_exec_approval_decision("approval-1", "accept-persistent"),
+        Ok(persistent_decision.clone())
+    );
+    assert_eq!(
+        chat.remote_im_exec_approval_decision("approval-1", "unsupported"),
+        Err("approval decision is not available for this request".to_string())
+    );
+
+    assert_eq!(
+        chat.validate_remote_im_exec_approval(
+            thread_id,
+            "turn-1",
+            "task-a",
+            "approval-1",
+            &codex_app_server_protocol::CommandExecutionApprovalDecision::Accept,
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        chat.validate_remote_im_exec_approval(
+            thread_id,
+            "turn-1",
+            "task-a",
+            "approval-1",
+            &persistent_decision,
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        chat.validate_remote_im_exec_approval(
+            ThreadId::new(),
+            "turn-1",
+            "task-a",
+            "approval-1",
+            &codex_app_server_protocol::CommandExecutionApprovalDecision::Accept,
+        ),
+        Err("approval belongs to a different Codex thread".to_string())
+    );
+    assert_eq!(
+        chat.validate_remote_im_exec_approval(
+            thread_id,
+            "turn-other",
+            "task-a",
+            "approval-1",
+            &codex_app_server_protocol::CommandExecutionApprovalDecision::Accept,
+        ),
+        Err("approval belongs to a different Codex turn".to_string())
+    );
+    assert_eq!(
+        chat.validate_remote_im_exec_approval(
+            thread_id,
+            "turn-1",
+            "task-b",
+            "approval-1",
+            &codex_app_server_protocol::CommandExecutionApprovalDecision::Accept,
+        ),
+        Err("approval belongs to a different remote IM task".to_string())
+    );
+    assert_eq!(
+        chat.validate_remote_im_exec_approval(
+            thread_id,
+            "turn-1",
+            "task-a",
+            "approval-1",
+            &codex_app_server_protocol::CommandExecutionApprovalDecision::Decline,
+        ),
+        Err("approval decision is not available for this request".to_string())
+    );
+
+    chat.note_remote_im_exec_approval_resolved("approval-1");
+    assert_eq!(
+        chat.validate_remote_im_exec_approval(
+            thread_id,
+            "turn-1",
+            "task-a",
+            "approval-1",
+            &codex_app_server_protocol::CommandExecutionApprovalDecision::Accept,
+        ),
+        Err("approval is no longer pending".to_string())
+    );
+    handle_turn_completed(&mut chat, "turn-1", None);
+    assert!(!chat.remote_im_turn_routes.contains_key("turn-1"));
+    assert!(chat.remote_im_turn_routes.contains_key("turn-2"));
+    assert_eq!(chat.remote_im_active_reply_id.as_deref(), Some("reply-b"));
+    assert_eq!(chat.remote_im_active_task_id.as_deref(), Some("task-b"));
+}
+
+#[tokio::test]
+async fn local_takeover_revokes_remote_approval_authority_synchronously() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    chat.remote_im_forwarding_active = true;
+    chat.remember_remote_im_turn_route_if_absent(
+        "turn-local-takeover".to_string(),
+        RemoteImTurnRoute {
+            reply_id: "reply-a".to_string(),
+            task_id: Some("task-a".to_string()),
+            source_routed: true,
+        },
+    );
+
+    let approval = |approval_id: &str| ExecApprovalRequestEvent {
+        call_id: format!("item-{approval_id}"),
+        approval_id: Some(approval_id.to_string()),
+        turn_id: "turn-local-takeover".into(),
+        environment_id: None,
+        raw_command: Some("Remove-Item -LiteralPath target -Recurse -Force".into()),
+        command: vec!["powershell".into(), "Remove-Item target -Force".into()],
+        cwd: AbsolutePathBuf::current_dir().expect("current dir"),
+        reason: Some("dangerous command".into()),
+        network_approval_context: None,
+        proposed_execpolicy_amendment: None,
+        proposed_network_policy_amendments: None,
+        additional_permissions: None,
+        available_decisions: Some(vec![
+            codex_app_server_protocol::CommandExecutionApprovalDecision::Accept,
+            codex_app_server_protocol::CommandExecutionApprovalDecision::Cancel,
+        ]),
+    };
+
+    handle_exec_approval_request(&mut chat, "request-before", approval("approval-before"));
+    assert_eq!(
+        chat.validate_remote_im_exec_approval(
+            thread_id,
+            "turn-local-takeover",
+            "task-a",
+            "approval-before",
+            &codex_app_server_protocol::CommandExecutionApprovalDecision::Accept,
+        ),
+        Ok(())
+    );
+
+    chat.set_remote_im_input_origin(false);
+    assert_eq!(
+        chat.validate_remote_im_exec_approval(
+            thread_id,
+            "turn-local-takeover",
+            "task-a",
+            "approval-before",
+            &codex_app_server_protocol::CommandExecutionApprovalDecision::Accept,
+        ),
+        Err("approval is no longer pending".to_string())
+    );
+
+    // The immutable turn route remains as a correlation tombstone, but it no
+    // longer grants the remote requester authority over commands initiated by
+    // the local steer.
+    handle_exec_approval_request(&mut chat, "request-after", approval("approval-after"));
+    assert_eq!(
+        chat.validate_remote_im_exec_approval(
+            thread_id,
+            "turn-local-takeover",
+            "task-a",
+            "approval-after",
+            &codex_app_server_protocol::CommandExecutionApprovalDecision::Accept,
+        ),
+        Err("approval is no longer pending".to_string())
+    );
+}
+
+#[tokio::test]
+async fn non_remote_or_uncorrelated_exec_approval_is_not_forwardable() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    chat.remember_remote_im_turn_route_if_absent(
+        "turn-2".to_string(),
+        RemoteImTurnRoute {
+            reply_id: "local-reply".to_string(),
+            task_id: Some("local-task".to_string()),
+            source_routed: false,
+        },
+    );
+
+    handle_exec_approval_request(
+        &mut chat,
+        "request-2",
+        ExecApprovalRequestEvent {
+            call_id: "item-2".into(),
+            approval_id: Some("approval-2".into()),
+            turn_id: "turn-2".into(),
+            environment_id: None,
+            raw_command: None,
+            command: vec!["rm".into(), "-f".into(), "target".into()],
+            cwd: AbsolutePathBuf::current_dir().expect("current dir"),
+            reason: None,
+            network_approval_context: None,
+            proposed_execpolicy_amendment: None,
+            proposed_network_policy_amendments: None,
+            additional_permissions: None,
+            available_decisions: None,
+        },
+    );
+
+    assert_eq!(
+        chat.validate_remote_im_exec_approval(
+            thread_id,
+            "turn-2",
+            "local-task",
+            "approval-2",
+            &codex_app_server_protocol::CommandExecutionApprovalDecision::Accept,
+        ),
+        Err("approval is no longer pending".to_string())
+    );
+
+    chat.remember_remote_im_turn_route_if_absent(
+        "turn-3".to_string(),
+        RemoteImTurnRoute {
+            reply_id: "reply-without-task".to_string(),
+            task_id: None,
+            source_routed: true,
+        },
+    );
+    handle_exec_approval_request(
+        &mut chat,
+        "request-3",
+        ExecApprovalRequestEvent {
+            call_id: "item-3".into(),
+            approval_id: Some("approval-3".into()),
+            turn_id: "turn-3".into(),
+            environment_id: None,
+            raw_command: None,
+            command: vec!["rm".into(), "-f".into(), "target".into()],
+            cwd: AbsolutePathBuf::current_dir().expect("current dir"),
+            reason: None,
+            network_approval_context: None,
+            proposed_execpolicy_amendment: None,
+            proposed_network_policy_amendments: None,
+            additional_permissions: None,
+            available_decisions: None,
+        },
+    );
+    assert_eq!(
+        chat.validate_remote_im_exec_approval(
+            thread_id,
+            "turn-3",
+            "missing-task",
+            "approval-3",
+            &codex_app_server_protocol::CommandExecutionApprovalDecision::Accept,
+        ),
+        Err("approval is no longer pending".to_string())
+    );
+}
+
+#[tokio::test]
 async fn exec_approval_decision_truncates_multiline_and_long_commands() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
@@ -380,6 +713,7 @@ async fn exec_approval_decision_truncates_multiline_and_long_commands() {
         approval_id: Some("call-multi".into()),
         turn_id: "turn-multi".into(),
         environment_id: None,
+        raw_command: None,
         command: vec!["bash".into(), "-lc".into(), "echo line1\necho line2".into()],
         cwd: AbsolutePathBuf::current_dir().expect("current dir"),
         reason: Some(
@@ -432,6 +766,7 @@ async fn exec_approval_decision_truncates_multiline_and_long_commands() {
         approval_id: Some("call-long".into()),
         turn_id: "turn-long".into(),
         environment_id: None,
+        raw_command: None,
         command: vec!["bash".into(), "-lc".into(), long],
         cwd: AbsolutePathBuf::current_dir().expect("current dir"),
         reason: None,

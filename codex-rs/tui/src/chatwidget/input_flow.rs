@@ -17,6 +17,9 @@ impl ChatWidget {
         input_result: InputResult,
         had_modal_or_popup: bool,
     ) {
+        if !matches!(&input_result, InputResult::None) {
+            self.set_remote_im_input_origin(false);
+        }
         match input_result {
             InputResult::Submitted {
                 text,

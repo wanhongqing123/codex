@@ -426,11 +426,17 @@ where
         self.flush()?;
 
         match cursor_position {
-            None => self.hide_cursor()?,
+            None => {
+                if !self.hidden_cursor {
+                    self.hide_cursor()?;
+                }
+            }
             Some(position) => {
                 self.set_cursor_style(cursor_style)?;
                 self.set_cursor_position(position)?;
-                self.show_cursor()?;
+                if self.hidden_cursor {
+                    self.show_cursor()?;
+                }
             }
         }
 
@@ -857,6 +863,7 @@ mod tests {
         size: Size,
         cursor: Position,
         size_call_count: std::cell::Cell<usize>,
+        events: Vec<String>,
     }
 
     impl CaptureBackend {
@@ -866,6 +873,7 @@ mod tests {
                 size: Size { width, height },
                 cursor: Position { x: 0, y: 0 },
                 size_call_count: std::cell::Cell::new(/*value*/ 0),
+                events: Vec::new(),
             }
         }
 
@@ -896,10 +904,12 @@ mod tests {
         }
 
         fn hide_cursor(&mut self) -> io::Result<()> {
+            self.events.push("hide".to_string());
             queue!(self, crossterm::cursor::Hide)
         }
 
         fn show_cursor(&mut self) -> io::Result<()> {
+            self.events.push("show".to_string());
             queue!(self, crossterm::cursor::Show)
         }
 
@@ -909,6 +919,8 @@ mod tests {
 
         fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
             self.cursor = position.into();
+            self.events
+                .push(format!("move:{},{}", self.cursor.x, self.cursor.y));
             let Position { x, y } = self.cursor;
             queue!(self, MoveTo(x, y))?;
             Ok(())
@@ -1258,6 +1270,45 @@ mod tests {
     }
 
     #[test]
+    fn terminal_draw_does_not_repeat_hide_cursor_when_already_hidden() {
+        let mut terminal =
+            Terminal::with_options(CaptureBackend::new(/*width*/ 2, /*height*/ 1))
+                .expect("terminal");
+        terminal.set_viewport_area(Rect::new(0, 0, 2, 1));
+
+        terminal
+            .try_draw(|_frame| io::Result::Ok(()))
+            .expect("first draw");
+        terminal
+            .try_draw(|_frame| io::Result::Ok(()))
+            .expect("second draw");
+
+        assert_eq!(terminal.backend().events, vec!["hide"]);
+    }
+
+    #[test]
+    fn terminal_draw_moves_cursor_before_showing_hidden_cursor() {
+        let mut terminal =
+            Terminal::with_options(CaptureBackend::new(/*width*/ 4, /*height*/ 2))
+                .expect("terminal");
+        terminal.set_viewport_area(Rect::new(0, 0, 4, 2));
+
+        terminal
+            .try_draw(|_frame| io::Result::Ok(()))
+            .expect("hide cursor");
+        terminal.backend_mut().events.clear();
+
+        terminal
+            .try_draw(|frame| {
+                frame.set_cursor_position((3, 1));
+                io::Result::Ok(())
+            })
+            .expect("show cursor");
+
+        assert_eq!(terminal.backend().events, vec!["move:3,1", "show"]);
+    }
+
+    #[test]
     fn terminal_draw_moves_cursor_before_showing_it() {
         let cursor_position = Position { x: 1, y: 0 };
         let mut terminal =
@@ -1267,6 +1318,9 @@ mod tests {
             /*x*/ 0, /*y*/ 0, /*width*/ 2, /*height*/ 1,
         ));
 
+        terminal
+            .try_draw(|_frame| io::Result::Ok(()))
+            .expect("hide cursor");
         terminal
             .try_draw(|frame| {
                 frame.set_cursor_position(cursor_position);
