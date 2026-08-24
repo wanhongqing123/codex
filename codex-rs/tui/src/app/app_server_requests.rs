@@ -5,6 +5,7 @@ use super::App;
 use crate::app_command::AppCommand;
 use crate::app_server_approval_conversions::granted_permission_profile_from_request;
 use crate::app_server_session::AppServerSession;
+use codex_app_server_protocol::CommandExecutionApprovalDecision;
 use codex_app_server_protocol::CommandExecutionRequestApprovalResponse;
 use codex_app_server_protocol::FileChangeRequestApprovalResponse;
 use codex_app_server_protocol::JSONRPCErrorError;
@@ -72,11 +73,68 @@ pub(crate) enum ResolvedAppServerRequest {
 
 #[derive(Debug, Default)]
 pub(super) struct PendingAppServerRequests {
-    exec_approvals: HashMap<(String, String), AppServerRequestId>,
+    exec: Box<ExecApprovalRegistry>,
     file_change_approvals: HashMap<(String, String), AppServerRequestId>,
     permissions_approvals: HashMap<(String, String), AppServerRequestId>,
     user_inputs: HashMap<String, VecDeque<PendingUserInputRequest>>,
     mcp_requests: HashMap<McpRequestKey, AppServerRequestId>,
+}
+
+#[derive(Debug, Default)]
+struct ExecApprovalRegistry {
+    pending: HashMap<(String, String), AppServerRequestId>,
+    summaries: HashMap<(String, String), String>,
+    resolved: HashMap<(String, String), ResolvedExecApproval>,
+    resolved_order: VecDeque<(String, String)>,
+}
+
+const MAX_RESOLVED_EXEC_APPROVAL_AUDIT: usize = 128;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExecApprovalResolutionSource {
+    LocalTui,
+    RemoteDecision,
+    RemoteImInput,
+}
+
+impl ExecApprovalResolutionSource {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalTui => "local-tui",
+            Self::RemoteDecision => "remote-decision",
+            Self::RemoteImInput => "remote-im-input",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ResolvedExecApproval {
+    pub(super) decision: CommandExecutionApprovalDecision,
+    pub(super) source: ExecApprovalResolutionSource,
+    pub(super) command_summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct AutoDeclinedExecApproval {
+    pub(super) approval_id: String,
+    pub(super) command_summary: String,
+}
+
+fn privacy_safe_command_summary(command: Option<&str>) -> String {
+    let executable = command
+        .map(str::trim_start)
+        .and_then(|command| match command.as_bytes().first().copied() {
+            Some(quote @ (b'\'' | b'"')) => command[1..]
+                .find(char::from(quote))
+                .map(|end| &command[1..end + 1]),
+            Some(_) => command.split_whitespace().next(),
+            None => None,
+        })
+        .and_then(|item| item.rsplit(['/', '\\']).next())
+        .filter(|item| !item.is_empty())
+        .unwrap_or("command");
+    let executable = executable.chars().take(64).collect::<String>();
+    format!("{executable} …")
 }
 
 impl PendingAppServerRequests {
@@ -87,11 +145,103 @@ impl PendingAppServerRequests {
     }
 
     pub(super) fn clear(&mut self) {
-        self.exec_approvals.clear();
+        self.exec.pending.clear();
+        self.exec.summaries.clear();
+        self.exec.resolved.clear();
+        self.exec.resolved_order.clear();
         self.file_change_approvals.clear();
         self.permissions_approvals.clear();
         self.user_inputs.clear();
         self.mcp_requests.clear();
+    }
+
+    pub(super) fn has_exec_approval(&self, thread_id: &str, id: &str) -> bool {
+        self.exec
+            .pending
+            .contains_key(&(Self::canonical_thread_id(thread_id), id.to_string()))
+    }
+
+    /// Snapshot command approvals that currently block this thread.
+    ///
+    /// Remote IM input uses this list to decline only the waiting command before steering the
+    /// same turn. Returning owned ids avoids holding a borrow while each app-server response is
+    /// awaited, and sorting makes diagnostics/tests deterministic despite the HashMap storage.
+    pub(super) fn exec_approval_ids_for_thread(&self, thread_id: &str) -> Vec<String> {
+        let thread_id = Self::canonical_thread_id(thread_id);
+        let mut ids = self
+            .exec
+            .pending
+            .keys()
+            .filter_map(|(candidate_thread_id, id)| {
+                (candidate_thread_id == &thread_id).then_some(id.clone())
+            })
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids
+    }
+
+    pub(super) fn exec_approval_command_summary(&self, thread_id: &str, id: &str) -> String {
+        self.exec
+            .summaries
+            .get(&(Self::canonical_thread_id(thread_id), id.to_string()))
+            .cloned()
+            .unwrap_or_else(|| "command".to_string())
+    }
+
+    pub(super) fn resolved_exec_approval(
+        &self,
+        thread_id: &str,
+        id: &str,
+    ) -> Option<&ResolvedExecApproval> {
+        self.exec
+            .resolved
+            .get(&(Self::canonical_thread_id(thread_id), id.to_string()))
+    }
+
+    pub(super) fn note_exec_approval_resolved(
+        &mut self,
+        thread_id: &str,
+        id: &str,
+        decision: CommandExecutionApprovalDecision,
+        source: ExecApprovalResolutionSource,
+    ) {
+        let key = (Self::canonical_thread_id(thread_id), id.to_string());
+        if self.exec.resolved.contains_key(&key) {
+            return;
+        }
+        let command_summary = self
+            .exec
+            .summaries
+            .remove(&key)
+            .unwrap_or_else(|| "command".to_string());
+        self.exec.resolved.insert(
+            key.clone(),
+            ResolvedExecApproval {
+                decision,
+                source,
+                command_summary,
+            },
+        );
+        self.exec.resolved_order.push_back(key);
+        while self.exec.resolved_order.len() > MAX_RESOLVED_EXEC_APPROVAL_AUDIT {
+            if let Some(expired) = self.exec.resolved_order.pop_front() {
+                self.exec.resolved.remove(&expired);
+            }
+        }
+    }
+
+    pub(super) fn restore_exec_approval(
+        &mut self,
+        thread_id: &str,
+        id: String,
+        request_id: AppServerRequestId,
+    ) {
+        let key = (Self::canonical_thread_id(thread_id), id);
+        self.exec
+            .summaries
+            .entry(key.clone())
+            .or_insert_with(|| "command".to_string());
+        self.exec.pending.entry(key).or_insert(request_id);
     }
 
     pub(super) fn note_server_request(
@@ -104,10 +254,19 @@ impl PendingAppServerRequests {
                     .approval_id
                     .clone()
                     .unwrap_or_else(|| params.item_id.clone());
-                self.exec_approvals.insert(
-                    (Self::canonical_thread_id(&params.thread_id), approval_id),
-                    request_id.clone(),
+                let key = (
+                    Self::canonical_thread_id(&params.thread_id),
+                    approval_id.clone(),
                 );
+                self.exec.resolved.remove(&key);
+                self.exec
+                    .resolved_order
+                    .retain(|candidate| candidate != &key);
+                self.exec.summaries.insert(
+                    key.clone(),
+                    privacy_safe_command_summary(params.command.as_deref()),
+                );
+                self.exec.pending.insert(key, request_id.clone());
                 None
             }
             ServerRequest::FileChangeRequestApproval { request_id, params } => {
@@ -204,8 +363,13 @@ impl PendingAppServerRequests {
         let thread_id = Self::canonical_thread_id(thread_id);
         let op: AppCommand = op.into();
         let resolution = match &op {
+            // Removing the request id is the single compare-and-set point for every decision
+            // source (local TUI, explicit Remote IM approval, or automatic Remote IM decline).
+            // App events are serialized; after the first claimant removes this entry, every late
+            // decision observes None and must remain a side-effect-free no-op.
             AppCommand::ExecApproval { id, decision, .. } => self
-                .exec_approvals
+                .exec
+                .pending
                 .remove(&(thread_id, id.clone()))
                 .map(|request_id| {
                     Ok::<AppServerRequestResolution, String>(AppServerRequestResolution {
@@ -303,10 +467,11 @@ impl PendingAppServerRequests {
         request_id: &AppServerRequestId,
     ) -> Option<ResolvedAppServerRequest> {
         let thread_id = Self::canonical_thread_id(thread_id);
-        if let Some(key) = self.exec_approvals.iter().find_map(|(key, value)| {
+        if let Some(key) = self.exec.pending.iter().find_map(|(key, value)| {
             (key.0 == thread_id && value == request_id).then(|| key.clone())
         }) {
-            self.exec_approvals.remove(&key);
+            self.exec.pending.remove(&key);
+            self.exec.summaries.remove(&key);
             return Some(ResolvedAppServerRequest::ExecApproval {
                 thread_id: key.0,
                 id: key.1,
@@ -357,7 +522,8 @@ impl PendingAppServerRequests {
     pub(super) fn contains_server_request(&self, request: &ServerRequest) -> bool {
         match request {
             ServerRequest::CommandExecutionRequestApproval { request_id, .. } => self
-                .exec_approvals
+                .exec
+                .pending
                 .values()
                 .any(|pending_request_id| pending_request_id == request_id),
             ServerRequest::FileChangeRequestApproval { request_id, .. } => self
@@ -439,9 +605,11 @@ struct McpRequestKey {
 
 #[cfg(test)]
 mod tests {
+    use super::ExecApprovalResolutionSource;
     use super::PendingAppServerRequests;
     use super::ResolvedAppServerRequest;
     use super::UnsupportedAppServerRequest;
+    use super::privacy_safe_command_summary;
     use crate::app_command::AppCommand as Op;
     use codex_app_server_protocol::AdditionalFileSystemPermissions;
     use codex_app_server_protocol::AdditionalNetworkPermissions;
@@ -471,6 +639,36 @@ mod tests {
     use std::collections::BTreeMap;
     use std::collections::HashMap;
     use std::path::PathBuf;
+
+    #[test]
+    fn command_summary_keeps_only_the_executable_basename() {
+        assert_eq!(
+            privacy_safe_command_summary(Some(
+                r#""C:\Program Files\PowerShell\pwsh.exe" -Command secret"#
+            )),
+            "pwsh.exe …"
+        );
+        assert_eq!(
+            privacy_safe_command_summary(Some("Remove-Item C:\\private\\secret.txt")),
+            "Remove-Item …"
+        );
+        assert_eq!(privacy_safe_command_summary(None), "command …");
+    }
+
+    #[test]
+    fn approval_registry_stays_heap_backed_in_the_main_app_state() {
+        let registry_size = std::mem::size_of::<PendingAppServerRequests>();
+        let app_size = std::mem::size_of::<crate::app::App>();
+        println!("PendingAppServerRequests={registry_size} App={app_size}");
+        assert!(
+            registry_size <= 256,
+            "approval registry grew inline: {registry_size}"
+        );
+        assert!(
+            app_size <= 64 * 1024,
+            "App grew too large for the Windows main stack: {app_size}"
+        );
+    }
 
     #[test]
     fn resolves_exec_approval_through_app_server_request_id() {
@@ -513,6 +711,138 @@ mod tests {
 
         assert_eq!(resolution.request_id, AppServerRequestId::Integer(41));
         assert_eq!(resolution.result, json!({ "decision": "accept" }));
+    }
+
+    #[test]
+    fn snapshots_sorted_exec_approval_ids_for_only_the_requested_thread() {
+        let mut pending = PendingAppServerRequests::default();
+        let selected_thread = codex_protocol::ThreadId::new().to_string();
+        let other_thread = codex_protocol::ThreadId::new().to_string();
+        pending.restore_exec_approval(
+            &selected_thread.to_ascii_uppercase(),
+            "approval-z".to_string(),
+            AppServerRequestId::Integer(1),
+        );
+        pending.restore_exec_approval(
+            &selected_thread.replace('-', ""),
+            "approval-a".to_string(),
+            AppServerRequestId::Integer(2),
+        );
+        pending.restore_exec_approval(
+            &other_thread,
+            "approval-other".to_string(),
+            AppServerRequestId::Integer(3),
+        );
+
+        assert_eq!(
+            pending.exec_approval_ids_for_thread(&selected_thread),
+            vec!["approval-a".to_string(), "approval-z".to_string()]
+        );
+    }
+
+    #[test]
+    fn first_exec_approval_resolution_wins_and_late_decisions_are_noops() {
+        let mut pending = PendingAppServerRequests::default();
+        let thread_id = codex_protocol::ThreadId::new().to_string();
+        let request = ServerRequest::CommandExecutionRequestApproval {
+            request_id: AppServerRequestId::Integer(44),
+            params: CommandExecutionRequestApprovalParams {
+                kind: Default::default(),
+                thread_id: thread_id.clone(),
+                turn_id: "turn-race".to_string(),
+                item_id: "call-race".to_string(),
+                started_at_ms: 0,
+                approval_id: Some("approval-race".to_string()),
+                environment_id: None,
+                reason: None,
+                network_approval_context: None,
+                command: Some("Remove-Item C:\\private\\target".to_string()),
+                cwd: None,
+                command_actions: None,
+                additional_permissions: None,
+                proposed_execpolicy_amendment: None,
+                proposed_network_policy_amendments: None,
+                available_decisions: None,
+            },
+        };
+        assert_eq!(pending.note_server_request(&request), None);
+
+        let winning_decision = CommandExecutionApprovalDecision::Decline;
+        assert!(
+            pending
+                .take_resolution(
+                    &thread_id,
+                    &Op::ExecApproval {
+                        id: "approval-race".to_string(),
+                        turn_id: Some("turn-race".to_string()),
+                        decision: winning_decision.clone(),
+                    },
+                )
+                .expect("winning decision should serialize")
+                .is_some()
+        );
+        pending.note_exec_approval_resolved(
+            &thread_id,
+            "approval-race",
+            winning_decision.clone(),
+            ExecApprovalResolutionSource::RemoteImInput,
+        );
+
+        assert_eq!(
+            pending
+                .take_resolution(
+                    &thread_id,
+                    &Op::ExecApproval {
+                        id: "approval-race".to_string(),
+                        turn_id: Some("turn-race".to_string()),
+                        decision: CommandExecutionApprovalDecision::Accept,
+                    },
+                )
+                .expect("late decision lookup should not fail"),
+            None
+        );
+        let winner = pending
+            .resolved_exec_approval(&thread_id, "approval-race")
+            .expect("winner audit should remain available");
+        assert_eq!(winner.decision, winning_decision);
+        assert_eq!(winner.source, ExecApprovalResolutionSource::RemoteImInput);
+        assert_eq!(winner.command_summary, "Remove-Item …");
+    }
+
+    #[test]
+    fn failed_exec_approval_resolution_can_be_restored_and_retried() {
+        let mut pending = PendingAppServerRequests::default();
+        let thread_id = codex_protocol::ThreadId::new().to_string();
+        let request_id = AppServerRequestId::Integer(42);
+        pending.restore_exec_approval(&thread_id, "approval-retry".to_string(), request_id.clone());
+
+        let first = pending
+            .take_resolution(
+                &thread_id,
+                &Op::ExecApproval {
+                    id: "approval-retry".to_string(),
+                    turn_id: Some("turn-retry".to_string()),
+                    decision: CommandExecutionApprovalDecision::Accept,
+                },
+            )
+            .expect("resolution should serialize")
+            .expect("restored request should be pending");
+        assert_eq!(first.request_id, request_id);
+
+        pending.restore_exec_approval(&thread_id, "approval-retry".to_string(), first.request_id);
+        let retry = pending
+            .take_resolution(
+                &thread_id,
+                &Op::ExecApproval {
+                    id: "approval-retry".to_string(),
+                    turn_id: Some("turn-retry".to_string()),
+                    decision: CommandExecutionApprovalDecision::Cancel,
+                },
+            )
+            .expect("retry should serialize")
+            .expect("failed request should remain retryable");
+        assert_eq!(retry.request_id, AppServerRequestId::Integer(42));
+        assert_eq!(retry.result, json!({ "decision": "cancel" }));
     }
 
     #[test]

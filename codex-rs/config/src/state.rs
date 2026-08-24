@@ -55,6 +55,9 @@ pub struct LoaderOverrides {
     /// Skip project-root discovery and all project configuration layers.
     pub ignore_project_config: bool,
     pub ignore_user_and_project_exec_policy_rules: bool,
+    /// Explicit CLI escape hatch: bypass all command exec-policy decisions for this process.
+    /// This is intentionally separate from `approval_policy = never`.
+    pub dangerously_bypass_exec_policy: bool,
     //TODO(gt): Add a macos_ prefix to this field and remove the target_os check.
     #[cfg(target_os = "macos")]
     pub managed_preferences_base64: Option<String>,
@@ -79,6 +82,7 @@ impl LoaderOverrides {
             ignore_user_config: false,
             ignore_project_config: false,
             ignore_user_and_project_exec_policy_rules: false,
+            dangerously_bypass_exec_policy: false,
             #[cfg(target_os = "macos")]
             managed_preferences_base64: Some(String::new()),
             macos_managed_config_requirements_base64: Some(String::new()),
@@ -261,6 +265,10 @@ pub struct ConfigLayerStack {
     /// Whether execpolicy should skip `.rules` files from user and project config-layer folders.
     ignore_user_and_project_exec_policy_rules: bool,
 
+    /// Whether the explicit `--dangerously-bypass-approvals-and-sandbox` launch flag
+    /// authorizes bypassing all command exec-policy decisions.
+    dangerously_bypass_exec_policy: bool,
+
     /// Startup warnings discovered while building this stack.
     ///
     /// `None` means the loader did not check for stack-level warnings, while
@@ -281,6 +289,7 @@ impl ConfigLayerStack {
             requirements,
             requirements_toml,
             ignore_user_and_project_exec_policy_rules: false,
+            dangerously_bypass_exec_policy: false,
             startup_warnings: None,
         })
     }
@@ -295,6 +304,18 @@ impl ConfigLayerStack {
 
     pub fn ignore_user_and_project_exec_policy_rules(&self) -> bool {
         self.ignore_user_and_project_exec_policy_rules
+    }
+
+    pub fn with_dangerous_exec_policy_bypass(
+        mut self,
+        dangerously_bypass_exec_policy: bool,
+    ) -> Self {
+        self.dangerously_bypass_exec_policy = dangerously_bypass_exec_policy;
+        self
+    }
+
+    pub fn dangerously_bypass_exec_policy(&self) -> bool {
+        self.dangerously_bypass_exec_policy
     }
 
     pub(crate) fn with_startup_warnings(mut self, startup_warnings: Vec<String>) -> Self {
@@ -410,6 +431,7 @@ impl ConfigLayerStack {
             requirements_toml: self.requirements_toml.clone(),
             ignore_user_and_project_exec_policy_rules: self
                 .ignore_user_and_project_exec_policy_rules,
+            dangerously_bypass_exec_policy: self.dangerously_bypass_exec_policy,
             startup_warnings: self.startup_warnings.clone(),
         })
     }
@@ -444,6 +466,7 @@ impl ConfigLayerStack {
             requirements_toml: self.requirements_toml.clone(),
             ignore_user_and_project_exec_policy_rules: self
                 .ignore_user_and_project_exec_policy_rules,
+            dangerously_bypass_exec_policy: self.dangerously_bypass_exec_policy,
             startup_warnings: self.startup_warnings.clone(),
         }
     }

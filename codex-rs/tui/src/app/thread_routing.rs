@@ -7,6 +7,9 @@
 use super::session_lifecycle::ThreadAttachPresentation;
 use super::*;
 use crate::app_event::ThreadTitleDestination;
+use crate::app::app_server_requests::AutoDeclinedExecApproval;
+use crate::app::app_server_requests::ExecApprovalResolutionSource;
+use crate::app::app_server_requests::ResolvedAppServerRequest;
 use crate::chatwidget::ThreadInputStateRestoreMode;
 use crate::session_resume::read_session_model;
 use codex_app_server_protocol::ThreadStartedNotification;
@@ -456,9 +459,30 @@ impl App {
         crate::session_log::log_outbound_op(&op);
 
         if self
-            .try_resolve_app_server_request(app_server, thread_id, &op)
+            .try_resolve_app_server_request(
+                app_server,
+                thread_id,
+                &op,
+                ExecApprovalResolutionSource::LocalTui,
+            )
             .await?
         {
+            return Ok(());
+        }
+
+        if let AppCommand::ExecApproval { id, .. } = &op
+            && let Some(winner) = self
+                .pending_app_server_requests
+                .resolved_exec_approval(&thread_id.to_string(), id)
+        {
+            tracing::info!(
+                %thread_id,
+                approval_id = %id,
+                winner = winner.source.as_str(),
+                winning_decision = ?winner.decision,
+                loser = ExecApprovalResolutionSource::LocalTui.as_str(),
+                "ignored a late command approval decision"
+            );
             return Ok(());
         }
 
@@ -880,11 +904,79 @@ impl App {
         }
     }
 
+    /// Decline command approvals that would otherwise keep a human Remote IM message waiting.
+    ///
+    /// `Decline` is deliberate: app-server maps `Cancel` to aborting the whole turn, which would
+    /// surface as `Conversation interrupted` and discard useful work. Declining only the command
+    /// releases its waiter; the caller can then steer the same regular turn with the new message.
+    pub(super) async fn decline_pending_exec_approvals_before_remote_im_input(
+        &mut self,
+        app_server: &AppServerSession,
+    ) -> Result<Vec<AutoDeclinedExecApproval>> {
+        let Some(thread_id) = self.chat_widget.thread_id() else {
+            return Ok(Vec::new());
+        };
+        let approval_ids = self
+            .pending_app_server_requests
+            .exec_approval_ids_for_thread(&thread_id.to_string());
+        let mut declined = Vec::new();
+        for approval_id in approval_ids {
+            let command_summary = self
+                .pending_app_server_requests
+                .exec_approval_command_summary(&thread_id.to_string(), &approval_id);
+            let op = AppCommand::exec_approval(
+                approval_id.clone(),
+                /*turn_id*/ None,
+                codex_app_server_protocol::CommandExecutionApprovalDecision::Decline,
+            );
+            if self
+                .try_resolve_app_server_request(
+                    app_server,
+                    thread_id,
+                    &op,
+                    ExecApprovalResolutionSource::RemoteImInput,
+                )
+                .await?
+            {
+                self.chat_widget.dismiss_app_server_request(
+                    &ResolvedAppServerRequest::ExecApproval {
+                        thread_id: thread_id.to_string(),
+                        id: approval_id.clone(),
+                    },
+                );
+                tracing::info!(
+                    %thread_id,
+                    %approval_id,
+                    "declined pending command approval before accepting Remote IM input"
+                );
+                declined.push(AutoDeclinedExecApproval {
+                    approval_id,
+                    command_summary,
+                });
+            }
+        }
+        if !declined.is_empty() {
+            let audit_hint = declined
+                .iter()
+                .map(|item| format!("{} ({})", item.approval_id, item.command_summary))
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.chat_widget
+                .add_to_history(history_cell::new_info_event(
+                "收到新的 Remote IM 消息，已自动拒绝等待中的命令审批；当前任务将继续处理新消息。"
+                    .to_string(),
+                Some(format!("审批：{audit_hint}")),
+            ));
+        }
+        Ok(declined)
+    }
+
     pub(super) async fn try_resolve_app_server_request(
         &mut self,
         app_server: &AppServerSession,
         thread_id: ThreadId,
         op: &AppCommand,
+        resolution_source: ExecApprovalResolutionSource,
     ) -> Result<bool> {
         let Some(resolution) = self
             .pending_app_server_requests
@@ -893,12 +985,27 @@ impl App {
         else {
             return Ok(false);
         };
+        let request_id_for_retry = resolution.request_id.clone();
 
         match app_server
             .resolve_server_request(resolution.request_id, resolution.result)
             .await
         {
             Ok(()) => {
+                if let AppCommand::ExecApproval { id, decision, .. } = op {
+                    self.pending_app_server_requests
+                        .note_exec_approval_resolved(
+                            &thread_id.to_string(),
+                            id,
+                            decision.clone(),
+                            resolution_source,
+                        );
+                    self.chat_widget.note_remote_im_exec_approval_resolved(
+                        id,
+                        Some(decision),
+                        Some(resolution_source),
+                    );
+                }
                 if ThreadEventStore::op_can_change_pending_replay_state(op) {
                     self.note_thread_outbound_op(thread_id, op).await;
                     self.refresh_pending_thread_approvals().await;
@@ -907,6 +1014,19 @@ impl App {
                 Ok(true)
             }
             Err(err) => {
+                if let AppCommand::ExecApproval { id, .. } = op {
+                    self.pending_app_server_requests.restore_exec_approval(
+                        &thread_id.to_string(),
+                        id.clone(),
+                        request_id_for_retry,
+                    );
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to resolve app-server request for thread {thread_id}: {err}"
+                    ));
+                    return Err(color_eyre::eyre::eyre!(
+                        "failed to resolve command approval for thread {thread_id}: {err}"
+                    ));
+                }
                 self.chat_widget.add_error_message(format!(
                     "Failed to resolve app-server request for thread {thread_id}: {err}"
                 ));
@@ -1798,6 +1918,14 @@ impl App {
         ) && self.pending_shutdown_exit_thread_id
             == self.active_thread_id;
 
+        // Whether this event marks the active thread's turn finishing. Used below
+        // to auto-return from an IM-initiated `/btw` side conversation.
+        let turn_completed = matches!(
+            &event,
+            ThreadBufferedEvent::Notification(notification)
+                if matches!(notification.as_ref(), ServerNotification::TurnCompleted(_))
+        );
+
         // Processing order matters:
         //
         // 1. handle unexpected non-primary shutdown failover first;
@@ -1903,6 +2031,9 @@ impl App {
             self.render_chat_widget_frame(tui, tui.terminal.last_known_screen_size)?;
             tui.discard_pending_input_before_interactive_screen()?;
             self.startup_pending_protected_request = false;
+        }
+        if turn_completed {
+            self.maybe_auto_return_from_im_side(tui, app_server).await?;
         }
         if self.backtrack_render_pending {
             tui.frame_requester().schedule_frame();

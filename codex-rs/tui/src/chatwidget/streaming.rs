@@ -139,7 +139,10 @@ impl ChatWidget {
     }
 
     pub(super) fn on_agent_message_delta(&mut self, delta: String) {
-        self.handle_streaming_delta(delta);
+        let visible = self.remote_im_reply_display.push(&delta);
+        if !visible.is_empty() {
+            self.handle_streaming_delta(visible);
+        }
     }
 
     pub(super) fn on_plan_delta(&mut self, delta: String) {
@@ -329,8 +332,30 @@ impl ChatWidget {
                 AgentMessageContent::Text { text } => message.push_str(text),
             }
         }
+        if !from_replay && matches!(item.phase, Some(MessagePhase::Commentary)) {
+            let turn_route = self.remote_im_route_for_turn(turn_id);
+            if turn_route.as_ref().is_some_and(|route| route.source_routed) {
+                crate::multi_ai_code_im_bridge::send_source_assistant_text(
+                    &message,
+                    Some(item.id.as_str()),
+                    turn_route.as_ref().map(|route| route.reply_id.as_str()),
+                    turn_route
+                        .as_ref()
+                        .and_then(|route| route.task_id.as_deref()),
+                );
+            } else if let Some(route) = turn_route {
+                crate::multi_ai_code_im_bridge::send_assistant_text(
+                    &message,
+                    Some(item.id.as_str()),
+                    route.task_id.as_deref(),
+                );
+            }
+        }
         let parsed = parse_assistant_markdown(&message, self.config.cwd.as_path());
-        self.finalize_completed_assistant_message(Some(parsed.visible_markdown.as_str()));
+        self.finalize_completed_assistant_message(
+            (!parsed.visible_markdown.is_empty()).then_some(parsed.visible_markdown.as_str()),
+        );
+        self.remote_im_reply_display.reset();
         if matches!(item.phase, Some(MessagePhase::FinalAnswer) | None)
             && !parsed.visible_markdown.is_empty()
         {

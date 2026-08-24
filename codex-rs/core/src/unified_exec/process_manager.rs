@@ -23,6 +23,7 @@ use crate::exec_env::inject_permission_profile_env;
 use crate::exec_env::inject_session_id_env;
 use crate::exec_policy::ExecApprovalRequest;
 use crate::guardian::GuardianReviewContext;
+use crate::exec_policy::dangerous_bypass_exec_approval_requirement;
 use crate::plugins::metrics::finish_and_track_measurements;
 use crate::sandboxing::ExecOptions;
 use crate::sandboxing::ExecRequest;
@@ -1368,43 +1369,49 @@ impl UnifiedExecProcessManager {
         let shell_snapshot = shell_snapshot_request(request, &cwd, context);
         let mut orchestrator = ToolOrchestrator::new();
         let mut runtime = UnifiedExecRuntime::new(self, request.shell_mode.clone());
-        let session_shell = context.session.user_shell();
-        let configured_shell = request
-            .turn_environment
-            .shell
-            .as_ref()
-            .unwrap_or(session_shell.as_ref());
-        // Legacy executors omit the platform. Unknown reported platforms use the
-        // more conservative Windows rules rather than silently weakening checks.
-        let command_platform = match request.turn_environment.executor_platform_os.as_deref() {
-            Some("linux" | "macos") => DangerousCommandPlatform::Posix,
-            Some("windows") | Some(_) => DangerousCommandPlatform::Windows,
-            None => DangerousCommandPlatform::host(),
-        };
-        let exec_approval_requirement = context
-            .session
-            .services
-            .exec_policy
-            .create_exec_approval_requirement_for_shell(
-                ExecApprovalRequest {
-                    command: &request.command,
-                    approval_policy: context.step_context.settings.approval_policy(),
-                    permission_profile: request.turn_environment.permission_profile().clone(),
-                    environment_policy: request.turn_environment.config().exec_policy.as_ref(),
-                    windows_sandbox_level: request.turn_environment.config().windows_sandbox_level,
-                    sandbox_permissions: if request.additional_permissions_preapproved {
-                        crate::sandboxing::SandboxPermissions::UseDefault
-                    } else {
-                        request.sandbox_permissions
+        let exec_approval_requirement = if let Some(requirement) =
+            dangerous_bypass_exec_approval_requirement(&turn.config.config_layer_stack)
+        {
+            requirement
+        } else {
+            let session_shell = context.session.user_shell();
+            let configured_shell = request
+                .turn_environment
+                .shell
+                .as_ref()
+                .unwrap_or(session_shell.as_ref());
+            // Legacy executors omit the platform. Unknown reported platforms use the
+            // more conservative Windows rules rather than silently weakening checks.
+            let command_platform = match request.turn_environment.executor_platform_os.as_deref() {
+                Some("linux" | "macos") => DangerousCommandPlatform::Posix,
+                Some("windows") | Some(_) => DangerousCommandPlatform::Windows,
+                None => DangerousCommandPlatform::host(),
+            };
+            context
+                .session
+                .services
+                .exec_policy
+                .create_exec_approval_requirement_for_shell(
+                    ExecApprovalRequest {
+                        command: &request.command,
+                        approval_policy: context.step_context.settings.approval_policy(),
+                        permission_profile: request.turn_environment.permission_profile().clone(),
+                        environment_policy: request.turn_environment.config().exec_policy.as_ref(),
+                        windows_sandbox_level: request.turn_environment.config().windows_sandbox_level,
+                        sandbox_permissions: if request.additional_permissions_preapproved {
+                            crate::sandboxing::SandboxPermissions::UseDefault
+                        } else {
+                            request.sandbox_permissions
+                        },
+                        prefix_rule: request.prefix_rule.clone(),
+                        allow_prefix_rules: context.step_context.turn.allow_prefix_rules(),
                     },
-                    prefix_rule: request.prefix_rule.clone(),
-                    allow_prefix_rules: context.step_context.turn.allow_prefix_rules(),
-                },
-                configured_shell,
-                &request.shell_mode,
-                command_platform,
-            )
-            .await;
+                    configured_shell,
+                    &request.shell_mode,
+                    command_platform,
+                )
+                .await
+        };
         let req = UnifiedExecToolRequest {
             command: request.command.clone(),
             shell_type: request.shell_type,

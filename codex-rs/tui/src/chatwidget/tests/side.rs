@@ -248,6 +248,34 @@ async fn submit_user_message_as_plain_user_turn_does_not_run_shell_commands() {
 }
 
 #[tokio::test]
+async fn remote_im_btw_side_turn_activates_source_reply_correlation() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    let model_text = concat!(
+        "检查最近一次失败日志\n\n",
+        "[IM_REPLY] Put final Markdown for IM between these exact markers, each on its own line in your reply:\n",
+        "Opening marker: <remote-im-reply id=\"reply-btw-fixed\">\n",
+        "Task marker: <remote-im-task id=\"task-btw-fixed\">\n",
+        "Closing marker: </remote-im-reply id=\"reply-btw-fixed\">\n",
+        "Text outside markers is ignored."
+    );
+
+    chat.submit_user_message_as_plain_user_turn(model_text.into());
+    assert!(matches!(next_submit_op(&mut op_rx), Op::UserTurn { .. }));
+    complete_user_message(&mut chat, "remote-btw-user", model_text);
+
+    assert_eq!(
+        chat.remote_im_active_reply_id.as_deref(),
+        Some("reply-btw-fixed")
+    );
+    assert_eq!(
+        chat.remote_im_active_task_id.as_deref(),
+        Some("task-btw-fixed")
+    );
+    assert!(chat.remote_im_pending_replies.is_empty());
+}
+
+#[tokio::test]
 async fn slash_side_without_args_starts_empty_side_conversation() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let parent_thread_id = ThreadId::new();
@@ -262,6 +290,7 @@ async fn slash_side_without_args_starts_empty_side_conversation() {
         rx.try_recv(),
         Ok(AppEvent::StartSide {
             parent_thread_id: emitted_parent_thread_id,
+            auto_return_on_turn_complete: false,
             user_message: None,
         }) if emitted_parent_thread_id == parent_thread_id
     );
@@ -287,6 +316,7 @@ async fn slash_btw_without_args_starts_empty_side_conversation() {
         rx.try_recv(),
         Ok(AppEvent::StartSide {
             parent_thread_id: emitted_parent_thread_id,
+            auto_return_on_turn_complete: false,
             user_message: None,
         }) if emitted_parent_thread_id == parent_thread_id
     );
@@ -318,6 +348,7 @@ async fn slash_side_requests_forked_side_question_while_task_running() {
         rx.try_recv(),
         Ok(AppEvent::StartSide {
             parent_thread_id: emitted_parent_thread_id,
+            auto_return_on_turn_complete: false,
             user_message: Some(user_message),
         }) if emitted_parent_thread_id == parent_thread_id
             && user_message
@@ -364,6 +395,7 @@ async fn slash_btw_requests_forked_side_question_while_task_running() {
         rx.try_recv(),
         Ok(AppEvent::StartSide {
             parent_thread_id: emitted_parent_thread_id,
+            auto_return_on_turn_complete: false,
             user_message: Some(user_message),
         }) if emitted_parent_thread_id == parent_thread_id
             && user_message
@@ -375,6 +407,51 @@ async fn slash_btw_requests_forked_side_question_while_task_running() {
                     mention_bindings: Vec::new(),
                 }
     );
+    assert!(
+        op_rx.try_recv().is_err(),
+        "expected no op on the parent thread"
+    );
+}
+
+#[tokio::test]
+async fn remote_im_btw_wraps_task_with_reply_markers() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let parent_thread_id = ThreadId::new();
+    chat.thread_id = Some(parent_thread_id);
+
+    chat.submit_btw_from_remote_im(
+        "检查最近一次失败日志".to_string(),
+        Some("reply-btw-fixed".to_string()),
+        Some("task-btw-fixed".to_string()),
+    )
+    .expect("remote IM /btw should start a side task");
+
+    match rx.try_recv() {
+        Ok(AppEvent::StartSide {
+            parent_thread_id: emitted_parent_thread_id,
+            auto_return_on_turn_complete: true,
+            user_message: Some(user_message),
+        }) => {
+            assert_eq!(emitted_parent_thread_id, parent_thread_id);
+            assert!(user_message.text.contains("检查最近一次失败日志"));
+            assert!(
+                user_message
+                    .text
+                    .contains("<remote-im-reply id=\"reply-btw-fixed\">")
+            );
+            assert!(
+                user_message
+                    .text
+                    .contains("</remote-im-reply id=\"reply-btw-fixed\">")
+            );
+            assert!(
+                user_message
+                    .text
+                    .contains("<remote-im-task id=\"task-btw-fixed\">")
+            );
+        }
+        other => panic!("expected StartSide with wrapped remote IM /btw task, got {other:?}"),
+    }
     assert!(
         op_rx.try_recv().is_err(),
         "expected no op on the parent thread"

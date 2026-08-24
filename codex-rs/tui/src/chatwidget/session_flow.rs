@@ -28,6 +28,9 @@ impl ChatWidget {
             self.backend_banner_notice_model = None;
             self.pending_automatic_thread_names.clear();
             self.review.recent_auto_review_denials = RecentAutoReviewDenials::default();
+            self.remote_im_turn_routes.clear();
+            self.remote_im_turn_route_order.clear();
+            self.invalidate_remote_im_exec_approvals();
             self.clear_thread_usage_state();
         }
         self.turn_lifecycle.reset_thread();

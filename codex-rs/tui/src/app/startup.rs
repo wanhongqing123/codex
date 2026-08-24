@@ -570,6 +570,7 @@ See the Codex keymap documentation for supported actions and examples."
         if !tui.is_terminal_focused() {
             app.recap.note_focus_lost(Instant::now());
         }
+        crate::multi_ai_code_im_bridge::start_control_listener(app.app_event_tx.clone());
         if start_in_agents_overview {
             app.open_agents_overview(&app_server);
         } else if !matches!(app.app_server_target, AppServerTarget::Embedded) {
