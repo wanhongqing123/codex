@@ -2,6 +2,7 @@ mod layer_io;
 mod local;
 #[cfg(target_os = "macos")]
 mod macos;
+mod project_discovery;
 #[cfg(test)]
 mod tests;
 
@@ -71,6 +72,7 @@ const PROJECT_LOCAL_CONFIG_DENYLIST: &[&str] = &[
     "openai_base_url",
     "chatgpt_base_url",
     "apps_mcp_product_sku",
+    "responses_api_metadata",
     "model_provider",
     "model_providers",
     "notify",
@@ -93,11 +95,12 @@ async fn first_layer_config_error_from_entries(layers: &[ConfigLayerEntry]) -> O
 /// - system    `/etc/codex/requirements.toml` (Unix) or
 ///   `%ProgramData%\OpenAI\Codex\requirements.toml` (Windows)
 /// - cloud:    enterprise-managed cloud config bundle requirements
-/// - legacy:   managed_config.toml reinterpreted as requirements.toml
+/// - legacy:   `/etc/codex/managed_config.toml` (Unix) reinterpreted as
+///   requirements.toml
 /// - admin:    managed preferences (*)
 ///
-/// For backwards compatibility, we also load from
-/// `managed_config.toml` and map it to `requirements.toml`.
+/// For backwards compatibility, Unix continues to load
+/// `/etc/codex/managed_config.toml` and map it to `requirements.toml`.
 ///
 /// Configuration is built up from multiple layers in the following order:
 ///
@@ -158,16 +161,30 @@ pub async fn load_config_layers_state(
                 ),
             )
         })?;
-        Some(ConfigLayerEntry::new(
+        ConfigLayerEntry::new(
             ConfigLayerSource::PackagedDefaults { file: file.clone() },
             resolve_relative_paths_in_config_toml(config, base_dir)?,
-        ))
+        )
     } else {
-        None
+        let file = AbsolutePathBuf::from_absolute_path(std::env::current_exe()?)?;
+        let raw_toml = include_str!("../../defaults.toml");
+        let config = toml::from_str(raw_toml).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid embedded packaged defaults; this is a Codex build error: {error}"),
+            )
+        })?;
+        ConfigLayerEntry::new_with_raw_toml(
+            ConfigLayerSource::PackagedDefaults { file },
+            config,
+            raw_toml.to_owned(),
+            AbsolutePathBuf::from_absolute_path(codex_home)?,
+        )
     };
     let active_user_profile = overrides.user_config_profile.clone();
     let ignore_managed_requirements = overrides.ignore_managed_requirements;
     let ignore_user_config = overrides.ignore_user_config;
+    let ignore_project_config = overrides.ignore_project_config;
     let ignore_user_and_project_exec_policy_rules =
         overrides.ignore_user_and_project_exec_policy_rules;
     let dangerously_bypass_exec_policy = overrides.dangerously_bypass_exec_policy;
@@ -219,10 +236,12 @@ pub async fn load_config_layers_state(
     let loaded_config_layers =
         layer_io::load_config_layers_internal(fs, codex_home, overrides.clone(), strict_config)
             .await?;
+    let mut startup_warnings = (!loaded_config_layers.startup_warnings.is_empty())
+        .then(|| loaded_config_layers.startup_warnings.clone());
     if !ignore_managed_requirements {
         requirements_layers.extend(system_requirements_layer);
         requirements_layers.extend(bundle_requirements_layers);
-        // Continue to support the legacy `managed_config.toml` locations as
+        // Continue to support loaded legacy `managed_config.toml` sources as
         // requirements layers for backwards compatibility.
         requirements_layers.extend(requirements_layers_from_legacy_scheme(
             loaded_config_layers.clone(),
@@ -250,7 +269,7 @@ pub async fn load_config_layers_state(
         .map_err(io::Error::other)?;
 
     let mut layers = Vec::<ConfigLayerEntry>::new();
-    layers.extend(packaged_defaults_layer);
+    layers.push(packaged_defaults_layer);
 
     let cli_overrides_layer = if cli_overrides.is_empty() {
         None
@@ -339,8 +358,7 @@ pub async fn load_config_layers_state(
         );
     }
 
-    let mut startup_warnings = None;
-    if let Some(cwd) = cwd {
+    if !ignore_project_config && let Some(cwd) = cwd {
         let mut merged_so_far = TomlValue::Table(toml::map::Map::new());
         for layer in &layers {
             merge_toml_values(&mut merged_so_far, &layer.config);
@@ -348,6 +366,13 @@ pub async fn load_config_layers_state(
         if let Some(cli_overrides_layer) = cli_overrides_layer.as_ref() {
             merge_toml_values(&mut merged_so_far, cli_overrides_layer);
         }
+        // Managed config wins over CLI config. Apply it before choosing the
+        // project root and trust, but keep its final layers above project config.
+        project_discovery::merge_managed_config_for_discovery(
+            &mut merged_so_far,
+            &loaded_config_layers,
+            codex_home,
+        )?;
 
         let project_root_markers = match project_root_markers_from_config(&merged_so_far) {
             Ok(markers) => markers.unwrap_or_else(default_project_root_markers),
@@ -398,7 +423,9 @@ pub async fn load_config_layers_state(
         )
         .await?;
         layers.extend(project_layers.layers);
-        startup_warnings = Some(project_layers.startup_warnings);
+        startup_warnings
+            .get_or_insert_with(Vec::new)
+            .extend(project_layers.startup_warnings);
     }
 
     // Add a layer for runtime overrides from the CLI or UI, if any exist.
@@ -421,6 +448,7 @@ pub async fn load_config_layers_state(
     let LoadedConfigLayers {
         managed_config,
         managed_config_from_mdm,
+        ..
     } = loaded_config_layers;
     if let Some(config) = managed_config {
         let managed_parent = config.file.as_path().parent().ok_or_else(|| {
@@ -568,7 +596,10 @@ async fn load_config_toml_for_required_layer_raw(
     })?;
     let base_dir = AbsolutePathBuf::from_absolute_path(config_parent)?;
     let toml_file_uri = PathUri::from_abs_path(toml_file);
-    let toml_value = match fs.read_file_text(&toml_file_uri, /*sandbox*/ None).await {
+    let toml_value = match fs
+        .read_file_text(&toml_file_uri, Default::default(), /*sandbox*/ None)
+        .await
+    {
         Ok(contents) => {
             let config: TomlValue = toml::from_str(&contents).map_err(|err| {
                 let config_error =
@@ -659,7 +690,11 @@ pub async fn load_requirements_toml(
 ) -> io::Result<Option<RequirementsLayerEntry>> {
     let requirements_toml_file_uri = PathUri::from_abs_path(requirements_toml_file);
     match fs
-        .read_file_text(&requirements_toml_file_uri, /*sandbox*/ None)
+        .read_file_text(
+            &requirements_toml_file_uri,
+            Default::default(),
+            /*sandbox*/ None,
+        )
         .await
     {
         Ok(contents) => {
@@ -716,6 +751,42 @@ fn system_requirements_toml_file_with_overrides(
         Some(path) => AbsolutePathBuf::from_absolute_path(path),
         None => system_requirements_toml_file(),
     }
+}
+
+/// Check local managed configuration sources without loading or parsing configuration.
+///
+/// Filesystem or managed-preference errors are returned so callers can conservatively avoid
+/// assuming that administrator-controlled configuration is absent.
+pub fn has_local_managed_configuration(codex_home: &Path) -> io::Result<bool> {
+    let system_requirements_file = system_requirements_toml_file()?;
+    has_local_managed_configuration_with_system_requirements_path(
+        codex_home,
+        system_requirements_file.as_path(),
+    )
+}
+
+fn has_local_managed_configuration_with_system_requirements_path(
+    codex_home: &Path,
+    system_requirements_path: &Path,
+) -> io::Result<bool> {
+    #[cfg(windows)]
+    let _ = codex_home;
+
+    #[cfg(not(windows))]
+    if layer_io::managed_config_default_path(codex_home).try_exists()? {
+        return Ok(true);
+    }
+
+    if system_requirements_path.try_exists()? {
+        return Ok(true);
+    }
+
+    #[cfg(target_os = "macos")]
+    if macos::has_managed_preferences()? {
+        return Ok(true);
+    }
+
+    Ok(false)
 }
 
 #[cfg(unix)]
@@ -820,6 +891,7 @@ fn requirements_layers_from_legacy_scheme(
     let LoadedConfigLayers {
         managed_config,
         managed_config_from_mdm,
+        ..
     } = loaded_config_layers;
 
     let layer_count =
@@ -998,9 +1070,11 @@ impl ProjectTrustContext {
         let gated_features = "project-local config, hooks, and exec policies";
         let trust_key = decision.trust_key.as_str();
         let user_config_file = self.user_config_file.as_path().display();
+        // Trust may come from managed config. Keep the explicit-untrusted prefix
+        // stable because the remote TUI uses it to recognize existing decisions.
         match decision.trust_level {
             Some(TrustLevel::Untrusted) => Some(format!(
-                "{trust_key} is marked as untrusted in {user_config_file}. To load {gated_features}, mark it trusted."
+                "{trust_key} is marked as untrusted in the effective configuration. To load {gated_features}, update its trust setting. If that setting is managed by your organization, contact your administrator."
             )),
             _ => Some(format!(
                 "To load {gated_features}, add {trust_key} as a trusted project in {user_config_file}."
@@ -1054,6 +1128,19 @@ fn sanitize_project_config(config: &mut TomlValue) -> Vec<String> {
         && features.remove("respect_system_proxy").is_some()
     {
         ignored_keys.push("features.respect_system_proxy".to_string());
+    }
+    // Repository contents must not turn an ordinary key into a permission increase.
+    if let Some(chat) = table
+        .get_mut("tui")
+        .and_then(|tui| tui.get_mut("keymap"))
+        .and_then(|keymap| keymap.get_mut("chat"))
+        .and_then(TomlValue::as_table_mut)
+    {
+        for key in ["previous_permission_mode", "next_permission_mode"] {
+            if chat.remove(key).is_some() {
+                ignored_keys.push(format!("tui.keymap.chat.{key}"));
+            }
+        }
     }
 
     ignored_keys
@@ -1250,13 +1337,26 @@ async fn find_project_root(
         for marker in project_root_markers {
             let marker_path = ancestor.join(marker);
             let marker_path_uri = PathUri::from_abs_path(&marker_path);
-            if fs
-                .get_metadata(&marker_path_uri, /*sandbox*/ None)
+            let Ok(metadata) = fs
+                .get_metadata(&marker_path_uri, Default::default(), /*sandbox*/ None)
                 .await
-                .is_ok()
+            else {
+                continue;
+            };
+            if marker == ".git"
+                && metadata.is_directory
+                && fs
+                    .get_metadata(
+                        &PathUri::from_abs_path(&marker_path.join("HEAD")),
+                        Default::default(),
+                        /*sandbox*/ None,
+                    )
+                    .await
+                    .is_err()
             {
-                return Ok(ancestor);
+                continue;
             }
+            return Ok(ancestor);
         }
     }
     Ok(cwd.clone())
@@ -1267,7 +1367,10 @@ async fn find_git_checkout_root(
     cwd: &AbsolutePathBuf,
 ) -> Option<AbsolutePathBuf> {
     let cwd_uri = PathUri::from_abs_path(cwd);
-    let base = match fs.get_metadata(&cwd_uri, /*sandbox*/ None).await {
+    let base = match fs
+        .get_metadata(&cwd_uri, Default::default(), /*sandbox*/ None)
+        .await
+    {
         Ok(metadata) if metadata.is_directory => cwd.clone(),
         _ => cwd.parent()?,
     };
@@ -1275,13 +1378,25 @@ async fn find_git_checkout_root(
     for dir in base.ancestors() {
         let dot_git = dir.join(".git");
         let dot_git_uri = PathUri::from_abs_path(&dot_git);
-        if fs
-            .get_metadata(&dot_git_uri, /*sandbox*/ None)
+        let Ok(metadata) = fs
+            .get_metadata(&dot_git_uri, Default::default(), /*sandbox*/ None)
             .await
-            .is_ok()
+        else {
+            continue;
+        };
+        if metadata.is_directory
+            && fs
+                .get_metadata(
+                    &PathUri::from_abs_path(&dot_git.join("HEAD")),
+                    Default::default(),
+                    /*sandbox*/ None,
+                )
+                .await
+                .is_err()
         {
-            return Some(dir);
+            continue;
         }
+        return Some(dir);
     }
     None
 }
@@ -1389,7 +1504,7 @@ async fn discover_project_layers(
         let dot_codex_abs = dir.join(".codex");
         let dot_codex_uri = PathUri::from_abs_path(&dot_codex_abs);
         if !fs
-            .get_metadata(&dot_codex_uri, /*sandbox*/ None)
+            .get_metadata(&dot_codex_uri, Default::default(), /*sandbox*/ None)
             .await
             .map(|metadata| metadata.is_directory)
             .unwrap_or(false)
@@ -1407,7 +1522,10 @@ async fn discover_project_layers(
         }
         let config_file = dot_codex_abs.join(CONFIG_TOML_FILE);
         let config_file_uri = PathUri::from_abs_path(&config_file);
-        match fs.read_file_text(&config_file_uri, /*sandbox*/ None).await {
+        match fs
+            .read_file_text(&config_file_uri, Default::default(), /*sandbox*/ None)
+            .await
+        {
             Ok(contents) => {
                 let config: TomlValue = match toml::from_str(&contents) {
                     Ok(config) => config,
@@ -1519,7 +1637,11 @@ async fn load_root_checkout_project_config(
     let hooks_config_file_uri = PathUri::from_abs_path(&hooks_config_file);
     Ok(
         match fs
-            .read_file_text(&hooks_config_file_uri, /*sandbox*/ None)
+            .read_file_text(
+                &hooks_config_file_uri,
+                Default::default(),
+                /*sandbox*/ None,
+            )
             .await
         {
             Ok(contents) => {

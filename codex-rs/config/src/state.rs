@@ -52,6 +52,8 @@ pub struct LoaderOverrides {
     /// Remote app servers own their authentication policy independently.
     pub ignore_login_requirements: bool,
     pub ignore_user_config: bool,
+    /// Skip project-root discovery and all project configuration layers.
+    pub ignore_project_config: bool,
     pub ignore_user_and_project_exec_policy_rules: bool,
     /// Explicit CLI escape hatch: bypass all command exec-policy decisions for this process.
     /// This is intentionally separate from `approval_policy = never`.
@@ -78,6 +80,7 @@ impl LoaderOverrides {
             ignore_managed_requirements: false,
             ignore_login_requirements: false,
             ignore_user_config: false,
+            ignore_project_config: false,
             ignore_user_and_project_exec_policy_rules: false,
             dangerously_bypass_exec_policy: false,
             #[cfg(target_os = "macos")]

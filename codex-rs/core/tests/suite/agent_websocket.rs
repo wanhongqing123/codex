@@ -1,16 +1,16 @@
 use anyhow::Result;
+use codex_core::TurnInputRequest;
 use codex_features::Feature;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::openai_models::ToolMode;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses::WebSocketConnectionConfig;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_exec_command_call;
 use core_test_support::responses::ev_response_created;
-use core_test_support::responses::ev_shell_command_call;
 use core_test_support::responses::start_websocket_server;
 use core_test_support::responses::start_websocket_server_with_headers;
 use core_test_support::skip_if_no_network;
@@ -36,29 +36,28 @@ async fn websocket_model_switch_to_responses_lite_omits_top_level_tools() -> Res
     let mut builder = test_codex()
         .with_model_info_override("gpt-5.2", |model_info| {
             model_info.tool_mode = Some(ToolMode::CodeMode);
+            model_info.node_repl_auto_review_required = true;
         })
         .with_model_info_override("gpt-5.4", |model_info| {
             model_info.use_responses_lite = true;
             model_info.tool_mode = Some(ToolMode::CodeMode);
+            model_info.node_repl_disabled = true;
         })
         .with_model("gpt-5.2");
     let test = builder.build_with_websocket_server(&server).await?;
 
     test.submit_turn("non-lite turn").await?;
     test.codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
                 text: "lite turn".into(),
                 text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: ThreadSettingsOverrides {
+            }])
+            .with_thread_settings(ThreadSettingsOverrides {
                 model: Some("gpt-5.4".to_string()),
                 ..Default::default()
-            },
-        })
+            }),
+        )
         .await?;
     wait_for_event(&test.codex, |event| {
         matches!(event, EventMsg::TurnComplete(_))
@@ -79,6 +78,20 @@ async fn websocket_model_switch_to_responses_lite_omits_top_level_tools() -> Res
 
     assert_eq!(non_lite_turn["model"].as_str(), Some("gpt-5.2"));
     assert_eq!(lite_turn["model"].as_str(), Some("gpt-5.4"));
+    for (request, auto_review_required, disabled) in
+        [(&non_lite_turn, true, false), (&lite_turn, false, true)]
+    {
+        let metadata: Value = serde_json::from_str(
+            request["client_metadata"]["x-codex-turn-metadata"]
+                .as_str()
+                .expect("websocket request should include turn metadata"),
+        )?;
+        assert_eq!(
+            metadata["node_repl_auto_review_required"],
+            auto_review_required
+        );
+        assert_eq!(metadata["node_repl_disabled"], disabled);
+    }
     assert!(
         non_lite_turn
             .get("tools")
@@ -106,11 +119,11 @@ async fn websocket_model_switch_to_responses_lite_omits_top_level_tools() -> Res
 async fn websocket_test_codex_shell_chain() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let call_id = "shell-command-call";
+    let call_id = "exec-command-call";
     let server = start_websocket_server(vec![vec![
         vec![
             ev_response_created("resp-1"),
-            ev_shell_command_call(call_id, "echo websocket"),
+            ev_exec_command_call(call_id, "echo websocket"),
             ev_completed("resp-1"),
         ],
         vec![
@@ -260,16 +273,16 @@ async fn websocket_first_turn_handles_handshake_delay_with_startup_prewarm() -> 
 async fn websocket_v2_test_codex_shell_chain() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let call_id = "shell-command-call";
-    let mut shell_command_call = ev_shell_command_call(call_id, "echo websocket");
-    shell_command_call["item"]["id"] = serde_json::json!("fc_shell_command_call");
-    shell_command_call["item"]["internal_chat_message_metadata_passthrough"] =
+    let call_id = "exec-command-call";
+    let mut exec_command_call = ev_exec_command_call(call_id, "echo websocket");
+    exec_command_call["item"]["id"] = serde_json::json!("fc_exec_command_call");
+    exec_command_call["item"]["internal_chat_message_metadata_passthrough"] =
         serde_json::json!({"turn_id": "turn-123"});
     let server = start_websocket_server(vec![vec![
         vec![ev_response_created("warm-1"), ev_completed("warm-1")],
         vec![
             ev_response_created("resp-1"),
-            shell_command_call,
+            exec_command_call,
             ev_completed("resp-1"),
         ],
         vec![

@@ -6,9 +6,7 @@ use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_rollout::RolloutRecorder;
-use codex_rollout::find_archived_thread_path_by_id_str;
 use codex_rollout::find_thread_name_by_id;
-use codex_rollout::find_thread_path_by_id_str;
 use codex_rollout::read_session_meta_line;
 use codex_rollout::read_thread_item_from_rollout;
 use codex_state::ThreadMetadata;
@@ -21,7 +19,7 @@ use super::helpers::rollout_path_is_archived;
 use super::helpers::set_thread_name;
 use super::helpers::sqlite_thread_name;
 use super::helpers::stored_thread_from_rollout_item;
-use super::live_writer;
+use super::thread_rollout_resolver;
 use crate::ReadThreadParams;
 use crate::StoredThread;
 use crate::StoredThreadHistory;
@@ -42,12 +40,8 @@ pub(super) async fn read_thread(
                     metadata.rollout_path.as_path(),
                 )))
         && (!params.include_history
-            || sqlite_rollout_path_can_load_history_for_thread(
-                store,
-                &metadata.rollout_path,
-                thread_id,
-            )
-            .await)
+            || sqlite_rollout_path_can_load_history_for_thread(&metadata.rollout_path, thread_id)
+                .await)
     {
         let metadata_sandbox_policy = metadata.sandbox_policy.clone();
         let mut thread = stored_thread_from_sqlite_metadata(store, metadata).await?;
@@ -71,6 +65,7 @@ pub(super) async fn read_thread(
             if thread.name.is_some() {
                 rollout_thread.name = thread.name;
             }
+            rollout_thread.project_id = thread.project_id;
             rollout_thread.git_info = thread.git_info;
             rollout_thread.permission_profile = permission_profile_from_metadata_value(
                 &metadata_sandbox_policy,
@@ -83,11 +78,17 @@ pub(super) async fn read_thread(
         return Ok(thread);
     }
 
-    let path = resolve_rollout_path(store, thread_id, params.include_archived)
-        .await?
-        .ok_or_else(|| ThreadStoreError::InvalidRequest {
-            message: format!("no rollout found for thread id {thread_id}"),
-        })?;
+    let resolved = if params.include_archived {
+        thread_rollout_resolver::resolve_current_including_archived(store, thread_id).await?
+    } else {
+        thread_rollout_resolver::resolve_current(store, thread_id).await?
+    };
+    let path =
+        resolved
+            .map(|resolved| resolved.path)
+            .ok_or_else(|| ThreadStoreError::InvalidRequest {
+                message: format!("no rollout found for thread id {thread_id}"),
+            })?;
 
     let mut thread = read_thread_from_rollout_path(store, path).await?;
     if !params.include_archived && thread.archived_at.is_some() {
@@ -101,7 +102,6 @@ pub(super) async fn read_thread(
 }
 
 async fn sqlite_rollout_path_can_load_history_for_thread(
-    store: &LocalThreadStore,
     path: &std::path::Path,
     thread_id: codex_protocol::ThreadId,
 ) -> bool {
@@ -111,9 +111,9 @@ async fn sqlite_rollout_path_can_load_history_for_thread(
     // SQLite metadata can outlive a moved/recreated rollout path. When history is
     // requested, verify the path still resolves to the requested thread before
     // trusting it as the source replay.
-    read_thread_from_rollout_path(store, path.to_path_buf())
+    read_session_meta_line(path)
         .await
-        .is_ok_and(|thread| thread.thread_id == thread_id)
+        .is_ok_and(|metadata| metadata.meta.id == thread_id)
 }
 
 pub(super) async fn read_thread_by_rollout_path(
@@ -140,6 +140,7 @@ pub(super) async fn read_thread_by_rollout_path(
             thread.section = metadata.section;
             thread.section_position = metadata.section_position;
             thread.section_entered_at = metadata.section_entered_at;
+            thread.project_id = metadata.project_id;
             if !metadata.cwd.as_os_str().is_empty()
                 && resolve_requested_rollout_path(store, metadata.rollout_path.clone())
                     .await
@@ -238,55 +239,6 @@ async fn attach_history_if_requested(
     Ok(())
 }
 
-pub(super) async fn resolve_rollout_path(
-    store: &LocalThreadStore,
-    thread_id: codex_protocol::ThreadId,
-    include_archived: bool,
-) -> ThreadStoreResult<Option<std::path::PathBuf>> {
-    if let Ok(path) = live_writer::rollout_path(store, thread_id).await
-        && codex_rollout::existing_rollout_path(path.as_path())
-            .await
-            .is_some()
-        && (include_archived || !rollout_path_is_archived(store.config.codex_home.as_path(), &path))
-    {
-        return Ok(Some(path));
-    }
-
-    let state_db_ctx = store.state_db().await;
-    if include_archived {
-        match find_thread_path_by_id_str(
-            store.config.codex_home.as_path(),
-            &thread_id.to_string(),
-            state_db_ctx.as_deref(),
-        )
-        .await
-        .map_err(|err| ThreadStoreError::InvalidRequest {
-            message: format!("failed to locate thread id {thread_id}: {err}"),
-        })? {
-            Some(path) => Ok(Some(path)),
-            None => find_archived_thread_path_by_id_str(
-                store.config.codex_home.as_path(),
-                &thread_id.to_string(),
-                state_db_ctx.as_deref(),
-            )
-            .await
-            .map_err(|err| ThreadStoreError::InvalidRequest {
-                message: format!("failed to locate archived thread id {thread_id}: {err}"),
-            }),
-        }
-    } else {
-        find_thread_path_by_id_str(
-            store.config.codex_home.as_path(),
-            &thread_id.to_string(),
-            state_db_ctx.as_deref(),
-        )
-        .await
-        .map_err(|err| ThreadStoreError::InvalidRequest {
-            message: format!("failed to locate thread id {thread_id}: {err}"),
-        })
-    }
-}
-
 async fn read_thread_from_rollout_path(
     store: &LocalThreadStore,
     path: std::path::PathBuf,
@@ -327,7 +279,7 @@ async fn read_thread_from_rollout_path(
 
 pub(super) async fn load_history_items(
     path: &std::path::Path,
-) -> ThreadStoreResult<Vec<codex_protocol::protocol::RolloutItem>> {
+) -> ThreadStoreResult<Vec<codex_rollout::RolloutItem>> {
     let (items, _, _) = RolloutRecorder::load_rollout_items(path)
         .await
         .map_err(|err| ThreadStoreError::Internal {
@@ -430,6 +382,7 @@ pub(super) fn stored_thread_from_state_metadata(
         section: metadata.section,
         section_position: metadata.section_position,
         section_entered_at: metadata.section_entered_at,
+        project_id: metadata.project_id,
         cwd: metadata.cwd,
         cli_version: metadata.cli_version,
         source: parse_session_source(&metadata.source),
@@ -528,6 +481,7 @@ fn stored_thread_from_meta_line(
         section: None,
         section_position: None,
         section_entered_at: None,
+        project_id: None,
         cwd: meta_line.meta.cwd,
         cli_version: meta_line.meta.cli_version,
         source: meta_line.meta.source,
@@ -577,11 +531,11 @@ mod tests {
     use codex_protocol::items::UserMessageItem;
     use codex_protocol::protocol::EventMsg;
     use codex_protocol::protocol::ItemCompletedEvent;
-    use codex_protocol::protocol::RolloutItem;
     use codex_protocol::protocol::SandboxPolicy;
     use codex_protocol::protocol::SessionSource;
     use codex_protocol::protocol::ThreadHistoryMode;
     use codex_protocol::user_input::UserInput;
+    use codex_rollout::RolloutItem;
     use codex_state::ThreadMetadataBuilder;
     use pretty_assertions::assert_eq;
     use tempfile::TempDir;
@@ -686,6 +640,7 @@ mod tests {
         metadata.section = Some(codex_state::ThreadSection {
             id: codex_state::PINNED_THREAD_SECTION_ID.to_string(),
             name: codex_state::PINNED_THREAD_SECTION_NAME.to_string(),
+            appearance: None,
         });
         metadata.section_position = Some(2_000_000);
         metadata.section_entered_at = Some(recency_at);

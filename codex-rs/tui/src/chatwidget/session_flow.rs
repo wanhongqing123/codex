@@ -19,6 +19,8 @@ impl ChatWidget {
         self.set_skills(/*skills*/ None);
         self.session_network_proxy = session.network_proxy.clone();
         let previous_thread_id = self.thread_id;
+        let connector_scope_changed = previous_thread_id != Some(session.thread_id)
+            || self.config.cwd.as_path() != session.cwd.as_path();
         self.thread_id = Some(session.thread_id);
         self.bottom_pane
             .set_queue_submissions(/*queue_submissions*/ false);
@@ -27,8 +29,8 @@ impl ChatWidget {
             self.remote_im_turn_routes.clear();
             self.remote_im_turn_route_order.clear();
             self.invalidate_remote_im_exec_approvals();
+            self.clear_thread_usage_state();
         }
-        self.refresh_plan_mode_nudge();
         self.turn_lifecycle.reset_thread();
         self.clear_safety_buffering();
         self.thread_name = session.thread_name.clone();
@@ -39,6 +41,9 @@ impl ChatWidget {
         self.current_rollout_path = session.rollout_path.clone();
         self.current_cwd = Some(session.cwd.to_path_buf());
         self.config.cwd = session.cwd.clone();
+        if connector_scope_changed {
+            self.invalidate_connector_scope();
+        }
         let runtime_workspace_roots = session.runtime_workspace_roots.clone();
         self.config.workspace_roots = runtime_workspace_roots.clone();
         self.config
@@ -103,7 +108,6 @@ impl ChatWidget {
                     mask.reasoning_effort = Some(session.reasoning_effort.clone());
                 }
                 self.update_collaboration_mode_indicator();
-                self.refresh_plan_mode_nudge();
             }
         }
         let effort = self.effective_reasoning_effort();
@@ -145,10 +149,14 @@ impl ChatWidget {
         }
         self.transcript.saw_copy_source_this_turn = false;
         self.refresh_skills_for_current_cwd(/*force_reload*/ true);
-        if self.connectors_enabled() {
-            self.prefetch_connectors();
-        }
+        self.refresh_connector_mentions(/*force_refresh*/ false);
+        let initial_user_message_pending = self.initial_user_message.is_some();
         self.submit_initial_user_message_if_pending();
+        if self.mcp_startup_status.is_none()
+            && (!initial_user_message_pending || self.is_user_turn_pending_or_running())
+        {
+            self.maybe_send_next_queued_input();
+        }
         if display == SessionConfiguredDisplay::Normal
             && let Some(forked_from_id) = forked_from_id
         {

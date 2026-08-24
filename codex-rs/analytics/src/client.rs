@@ -9,6 +9,8 @@ use crate::facts::AnalyticsJsonRpcError;
 use crate::facts::AppInvocation;
 use crate::facts::AppMentionedInput;
 use crate::facts::AppUsedInput;
+use crate::facts::ArtifactOperation;
+use crate::facts::ArtifactOperationInput;
 use crate::facts::CodexGoalEvent;
 use crate::facts::CustomAnalyticsFact;
 use crate::facts::ExternalAgentConfigImportCompletedInput;
@@ -20,6 +22,7 @@ use crate::facts::PluginInstallFailedInput;
 use crate::facts::PluginInstallRequested;
 use crate::facts::PluginInstallRequestedInput;
 use crate::facts::PluginInstallSource;
+use crate::facts::PluginMeasurementsInput;
 use crate::facts::PluginState;
 use crate::facts::PluginStateChangedInput;
 use crate::facts::SkillInvocation;
@@ -32,9 +35,14 @@ use crate::facts::TurnResolvedConfigFact;
 use crate::facts::TurnTokenUsageFact;
 use crate::now_unix_millis;
 use crate::reducer::AnalyticsReducer;
+use crate::reducer::MAX_PLUGIN_MEASUREMENTS_PER_BATCH;
+use crate::reducer::valid_plugin_measurement_identifier;
+use crate::reducer::valid_plugin_measurement_row;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ClientResponsePayload;
 use codex_app_server_protocol::InitializeParams;
+use codex_app_server_protocol::ItemCompletedNotification;
+use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
@@ -45,6 +53,9 @@ use codex_login::CodexAuth;
 use codex_login::default_client::create_client;
 use codex_plugin::PluginId;
 use codex_plugin::PluginTelemetryMetadata;
+use codex_protocol::items::CollabAgentToolCallItem;
+use codex_protocol::items::CollabAgentToolCallStatus;
+use codex_protocol::items::TurnItem;
 use codex_protocol::request_permissions::RequestPermissionsResponse;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -253,6 +264,26 @@ impl AnalyticsEventsClient {
         }
     }
 
+    pub fn is_enabled(&self) -> bool {
+        self.queue.is_some()
+    }
+
+    pub fn track_plugin_measurements(&self, mut input: PluginMeasurementsInput) {
+        if input.rows.is_empty()
+            || input.rows.len() > MAX_PLUGIN_MEASUREMENTS_PER_BATCH
+            || !valid_plugin_measurement_identifier(&input.operation)
+        {
+            return;
+        }
+        input.rows.retain(valid_plugin_measurement_row);
+        if input.rows.is_empty() {
+            return;
+        }
+        self.record_fact(AnalyticsFact::Custom(
+            CustomAnalyticsFact::PluginMeasurements(input),
+        ));
+    }
+
     pub fn track_skill_invocations(
         &self,
         tracking: TrackEventsContext,
@@ -267,6 +298,19 @@ impl AnalyticsEventsClient {
                 invocations,
             },
         )));
+    }
+
+    pub fn track_artifact_operation(
+        &self,
+        tracking: TrackEventsContext,
+        operation: ArtifactOperation,
+    ) {
+        self.record_fact(AnalyticsFact::Custom(
+            CustomAnalyticsFact::ArtifactOperation(ArtifactOperationInput {
+                tracking,
+                operation,
+            }),
+        ));
     }
 
     pub fn track_initialize(
@@ -291,10 +335,43 @@ impl AnalyticsEventsClient {
         ));
     }
 
+    pub fn track_collab_tool_call(
+        &self,
+        turn_id: String,
+        mut item: CollabAgentToolCallItem,
+        started_at_ms: i64,
+        completed_at_ms: i64,
+    ) {
+        let thread_id = item.sender_thread_id.to_string();
+        let completed_item = TurnItem::CollabAgentToolCall(item.clone()).into();
+        item.status = CollabAgentToolCallStatus::InProgress;
+
+        self.track_notification(&ServerNotification::ItemStarted(ItemStartedNotification {
+            item: TurnItem::CollabAgentToolCall(item).into(),
+            thread_id: thread_id.clone(),
+            turn_id: turn_id.clone(),
+            started_at_ms,
+        }));
+        self.track_notification(&ServerNotification::ItemCompleted(
+            ItemCompletedNotification {
+                item: completed_item,
+                thread_id,
+                turn_id,
+                completed_at_ms,
+            },
+        ));
+    }
+
     pub fn track_code_mode_tool_call(&self, input: crate::facts::CodeModeToolCallFact) {
         self.record_fact(AnalyticsFact::Custom(
             CustomAnalyticsFact::CodeModeToolCall(input),
         ));
+    }
+
+    pub fn track_control_tool_call(&self, input: crate::facts::ControlToolCallFact) {
+        self.record_fact(AnalyticsFact::Custom(CustomAnalyticsFact::ControlToolCall(
+            input,
+        )));
     }
 
     pub fn track_guardian_review(

@@ -349,7 +349,7 @@ pub async fn read_mcp_resource(
     codex_apps_tools_cache: ConnectorRuntimeManager<ToolInfo>,
     tool_catalog_cache: crate::McpToolCatalogCache,
     server: &str,
-    uri: &str,
+    params: ReadResourceRequestParams,
 ) -> anyhow::Result<ReadResourceResult> {
     let mut mcp_servers = effective_mcp_servers(config, auth);
     mcp_servers.retain(|name, _| name == server);
@@ -382,9 +382,7 @@ pub async fn read_mcp_resource(
     )
     .await;
 
-    let result = manager
-        .read_resource(server, ReadResourceRequestParams::new(uri))
-        .await;
+    let result = manager.read_resource(server, params).await;
     cancel_token.cancel();
     result
 }
@@ -565,6 +563,7 @@ fn mcp_server_config_for_url(
             bearer_token_env_var: codex_apps_mcp_bearer_token_env_var(),
             http_headers: Some(http_headers),
             env_http_headers,
+            http_headers_helper: None,
         },
         auth: auth_mode,
         environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),

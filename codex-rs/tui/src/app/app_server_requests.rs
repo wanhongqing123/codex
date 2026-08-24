@@ -50,12 +50,15 @@ pub(super) struct UnsupportedAppServerRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ResolvedAppServerRequest {
     ExecApproval {
+        thread_id: String,
         id: String,
     },
     FileChangeApproval {
+        thread_id: String,
         id: String,
     },
     PermissionsApproval {
+        thread_id: String,
         id: String,
     },
     UserInput {
@@ -69,14 +72,20 @@ pub(crate) enum ResolvedAppServerRequest {
 
 #[derive(Debug, Default)]
 pub(super) struct PendingAppServerRequests {
-    exec_approvals: HashMap<String, AppServerRequestId>,
-    file_change_approvals: HashMap<String, AppServerRequestId>,
-    permissions_approvals: HashMap<String, AppServerRequestId>,
+    exec_approvals: HashMap<(String, String), AppServerRequestId>,
+    file_change_approvals: HashMap<(String, String), AppServerRequestId>,
+    permissions_approvals: HashMap<(String, String), AppServerRequestId>,
     user_inputs: HashMap<String, VecDeque<PendingUserInputRequest>>,
     mcp_requests: HashMap<McpRequestKey, AppServerRequestId>,
 }
 
 impl PendingAppServerRequests {
+    fn canonical_thread_id(thread_id: &str) -> String {
+        codex_protocol::ThreadId::from_string(thread_id)
+            .map(|thread_id| thread_id.to_string())
+            .unwrap_or_else(|_| thread_id.to_string())
+    }
+
     pub(super) fn clear(&mut self) {
         self.exec_approvals.clear();
         self.file_change_approvals.clear();
@@ -85,12 +94,20 @@ impl PendingAppServerRequests {
         self.mcp_requests.clear();
     }
 
-    pub(super) fn has_exec_approval(&self, id: &str) -> bool {
-        self.exec_approvals.contains_key(id)
+    pub(super) fn has_exec_approval(&self, thread_id: &str, id: &str) -> bool {
+        self.exec_approvals
+            .contains_key(&(Self::canonical_thread_id(thread_id), id.to_string()))
     }
 
-    pub(super) fn restore_exec_approval(&mut self, id: String, request_id: AppServerRequestId) {
-        self.exec_approvals.entry(id).or_insert(request_id);
+    pub(super) fn restore_exec_approval(
+        &mut self,
+        thread_id: &str,
+        id: String,
+        request_id: AppServerRequestId,
+    ) {
+        self.exec_approvals
+            .entry((Self::canonical_thread_id(thread_id), id))
+            .or_insert(request_id);
     }
 
     pub(super) fn note_server_request(
@@ -103,12 +120,20 @@ impl PendingAppServerRequests {
                     .approval_id
                     .clone()
                     .unwrap_or_else(|| params.item_id.clone());
-                self.exec_approvals.insert(approval_id, request_id.clone());
+                self.exec_approvals.insert(
+                    (Self::canonical_thread_id(&params.thread_id), approval_id),
+                    request_id.clone(),
+                );
                 None
             }
             ServerRequest::FileChangeRequestApproval { request_id, params } => {
-                self.file_change_approvals
-                    .insert(params.item_id.clone(), request_id.clone());
+                self.file_change_approvals.insert(
+                    (
+                        Self::canonical_thread_id(&params.thread_id),
+                        params.item_id.clone(),
+                    ),
+                    request_id.clone(),
+                );
                 None
             }
             ServerRequest::PermissionsRequestApproval { request_id, params } => {
@@ -124,8 +149,13 @@ impl PendingAppServerRequests {
                         message: format!("failed to localize requested filesystem paths: {err}"),
                     });
                 }
-                self.permissions_approvals
-                    .insert(params.item_id.clone(), request_id.clone());
+                self.permissions_approvals.insert(
+                    (
+                        Self::canonical_thread_id(&params.thread_id),
+                        params.item_id.clone(),
+                    ),
+                    request_id.clone(),
+                );
                 None
             }
             ServerRequest::ToolRequestUserInput { request_id, params } => {
@@ -148,12 +178,7 @@ impl PendingAppServerRequests {
                 );
                 None
             }
-            ServerRequest::DynamicToolCall { request_id, .. } => {
-                Some(UnsupportedAppServerRequest {
-                    request_id: request_id.clone(),
-                    message: "Dynamic tool calls are not available in TUI yet.".to_string(),
-                })
-            }
+            ServerRequest::DynamicToolCall { .. } => None,
             ServerRequest::ChatgptAuthTokensRefresh { .. } => None,
             ServerRequest::AttestationGenerate { request_id, .. } => {
                 Some(UnsupportedAppServerRequest {
@@ -186,16 +211,18 @@ impl PendingAppServerRequests {
 
     pub(super) fn take_resolution<T>(
         &mut self,
+        thread_id: &str,
         op: T,
     ) -> Result<Option<AppServerRequestResolution>, String>
     where
         T: Into<AppCommand>,
     {
+        let thread_id = Self::canonical_thread_id(thread_id);
         let op: AppCommand = op.into();
         let resolution = match &op {
             AppCommand::ExecApproval { id, decision, .. } => self
                 .exec_approvals
-                .remove(id)
+                .remove(&(thread_id, id.clone()))
                 .map(|request_id| {
                     Ok::<AppServerRequestResolution, String>(AppServerRequestResolution {
                         request_id,
@@ -212,7 +239,7 @@ impl PendingAppServerRequests {
                 .transpose()?,
             AppCommand::PatchApproval { id, decision } => self
                 .file_change_approvals
-                .remove(id)
+                .remove(&(thread_id, id.clone()))
                 .map(|request_id| {
                     Ok::<AppServerRequestResolution, String>(AppServerRequestResolution {
                         request_id,
@@ -227,7 +254,7 @@ impl PendingAppServerRequests {
                 .transpose()?,
             AppCommand::RequestPermissionsResponse { id, response } => self
                 .permissions_approvals
-                .remove(id)
+                .remove(&(thread_id, id.clone()))
                 .map(|request_id| {
                     Ok::<AppServerRequestResolution, String>(AppServerRequestResolution {
                         request_id,
@@ -288,33 +315,38 @@ impl PendingAppServerRequests {
 
     pub(super) fn resolve_notification(
         &mut self,
+        thread_id: &str,
         request_id: &AppServerRequestId,
     ) -> Option<ResolvedAppServerRequest> {
-        if let Some(id) = self
-            .exec_approvals
-            .iter()
-            .find_map(|(id, value)| (value == request_id).then(|| id.clone()))
-        {
-            self.exec_approvals.remove(&id);
-            return Some(ResolvedAppServerRequest::ExecApproval { id });
+        let thread_id = Self::canonical_thread_id(thread_id);
+        if let Some(key) = self.exec_approvals.iter().find_map(|(key, value)| {
+            (key.0 == thread_id && value == request_id).then(|| key.clone())
+        }) {
+            self.exec_approvals.remove(&key);
+            return Some(ResolvedAppServerRequest::ExecApproval {
+                thread_id: key.0,
+                id: key.1,
+            });
         }
 
-        if let Some(id) = self
-            .file_change_approvals
-            .iter()
-            .find_map(|(id, value)| (value == request_id).then(|| id.clone()))
-        {
-            self.file_change_approvals.remove(&id);
-            return Some(ResolvedAppServerRequest::FileChangeApproval { id });
+        if let Some(key) = self.file_change_approvals.iter().find_map(|(key, value)| {
+            (key.0 == thread_id && value == request_id).then(|| key.clone())
+        }) {
+            self.file_change_approvals.remove(&key);
+            return Some(ResolvedAppServerRequest::FileChangeApproval {
+                thread_id: key.0,
+                id: key.1,
+            });
         }
 
-        if let Some(id) = self
-            .permissions_approvals
-            .iter()
-            .find_map(|(id, value)| (value == request_id).then(|| id.clone()))
-        {
-            self.permissions_approvals.remove(&id);
-            return Some(ResolvedAppServerRequest::PermissionsApproval { id });
+        if let Some(key) = self.permissions_approvals.iter().find_map(|(key, value)| {
+            (key.0 == thread_id && value == request_id).then(|| key.clone())
+        }) {
+            self.permissions_approvals.remove(&key);
+            return Some(ResolvedAppServerRequest::PermissionsApproval {
+                thread_id: key.0,
+                id: key.1,
+            });
         }
 
         if let Some(pending) = self.remove_user_input_request(request_id) {
@@ -363,12 +395,12 @@ impl PendingAppServerRequests {
                 .mcp_requests
                 .values()
                 .any(|pending_request_id| pending_request_id == request_id),
+            ServerRequest::ChatgptAuthTokensRefresh { .. } => true,
             ServerRequest::DynamicToolCall { .. }
-            | ServerRequest::ChatgptAuthTokensRefresh { .. }
             | ServerRequest::AttestationGenerate { .. }
             | ServerRequest::CurrentTimeRead { .. }
             | ServerRequest::ApplyPatchApproval { .. }
-            | ServerRequest::ExecCommandApproval { .. } => true,
+            | ServerRequest::ExecCommandApproval { .. } => false,
         }
     }
 
@@ -483,11 +515,14 @@ mod tests {
         assert_eq!(pending.note_server_request(&request), None);
 
         let resolution = pending
-            .take_resolution(&Op::ExecApproval {
-                id: "approval-1".to_string(),
-                turn_id: None,
-                decision: CommandExecutionApprovalDecision::Accept,
-            })
+            .take_resolution(
+                "thread-1",
+                &Op::ExecApproval {
+                    id: "approval-1".to_string(),
+                    turn_id: None,
+                    decision: CommandExecutionApprovalDecision::Accept,
+                },
+            )
             .expect("resolution should serialize")
             .expect("request should be pending");
 
@@ -498,30 +533,114 @@ mod tests {
     #[test]
     fn failed_exec_approval_resolution_can_be_restored_and_retried() {
         let mut pending = PendingAppServerRequests::default();
+        let thread_id = codex_protocol::ThreadId::new().to_string();
         let request_id = AppServerRequestId::Integer(42);
-        pending.restore_exec_approval("approval-retry".to_string(), request_id.clone());
+        pending.restore_exec_approval(&thread_id, "approval-retry".to_string(), request_id.clone());
 
         let first = pending
-            .take_resolution(&Op::ExecApproval {
-                id: "approval-retry".to_string(),
-                turn_id: Some("turn-retry".to_string()),
-                decision: CommandExecutionApprovalDecision::Accept,
-            })
+            .take_resolution(
+                &thread_id,
+                &Op::ExecApproval {
+                    id: "approval-retry".to_string(),
+                    turn_id: Some("turn-retry".to_string()),
+                    decision: CommandExecutionApprovalDecision::Accept,
+                },
+            )
             .expect("resolution should serialize")
             .expect("restored request should be pending");
         assert_eq!(first.request_id, request_id);
 
-        pending.restore_exec_approval("approval-retry".to_string(), first.request_id);
+        pending.restore_exec_approval(&thread_id, "approval-retry".to_string(), first.request_id);
         let retry = pending
-            .take_resolution(&Op::ExecApproval {
-                id: "approval-retry".to_string(),
-                turn_id: Some("turn-retry".to_string()),
-                decision: CommandExecutionApprovalDecision::Cancel,
-            })
+            .take_resolution(
+                &thread_id,
+                &Op::ExecApproval {
+                    id: "approval-retry".to_string(),
+                    turn_id: Some("turn-retry".to_string()),
+                    decision: CommandExecutionApprovalDecision::Cancel,
+                },
+            )
             .expect("retry should serialize")
             .expect("failed request should remain retryable");
         assert_eq!(retry.request_id, AppServerRequestId::Integer(42));
         assert_eq!(retry.result, json!({ "decision": "cancel" }));
+    }
+
+    #[test]
+    fn colliding_approvals_resolve_only_on_their_own_thread() {
+        let approvals = [
+            (
+                "item/commandExecution/requestApproval",
+                Op::ExecApproval {
+                    id: "shared-id".to_string(),
+                    turn_id: None,
+                    decision: CommandExecutionApprovalDecision::Accept,
+                },
+            ),
+            (
+                "item/fileChange/requestApproval",
+                Op::PatchApproval {
+                    id: "shared-id".to_string(),
+                    decision: FileChangeApprovalDecision::Accept,
+                },
+            ),
+            (
+                "item/permissions/requestApproval",
+                Op::RequestPermissionsResponse {
+                    id: "shared-id".to_string(),
+                    response: codex_protocol::request_permissions::RequestPermissionsResponse {
+                        permissions: RequestPermissionProfile::default(),
+                        scope: codex_protocol::request_permissions::PermissionGrantScope::Turn,
+                        strict_auto_review: false,
+                    },
+                },
+            ),
+        ];
+
+        for (method, op) in approvals {
+            let mut pending = PendingAppServerRequests::default();
+            let thread_ids = [
+                codex_protocol::ThreadId::new().to_string(),
+                codex_protocol::ThreadId::new().to_string(),
+            ];
+            for (index, thread_id) in thread_ids.iter().enumerate() {
+                let wire_thread_id = if index == 0 {
+                    thread_id.to_ascii_uppercase()
+                } else {
+                    thread_id.replace('-', "")
+                };
+                let request: ServerRequest = serde_json::from_value(json!({
+                    "method": method,
+                    "id": index + 1,
+                    "params": {
+                        "threadId": wire_thread_id,
+                        "turnId": "turn-1",
+                        "itemId": "shared-id",
+                        "startedAtMs": 0,
+                        "cwd": if cfg!(windows) { r"C:\tmp" } else { "/tmp" },
+                        "permissions": {},
+                    },
+                }))
+                .expect("approval request should deserialize");
+                assert_eq!(pending.note_server_request(&request), None);
+                assert!(pending.contains_server_request(&request));
+            }
+            assert_eq!(
+                pending.resolve_notification(&thread_ids[1], &AppServerRequestId::Integer(1)),
+                None
+            );
+
+            for (thread_id, request_id) in thread_ids.iter().zip(1..=2) {
+                let resolution = pending
+                    .take_resolution(thread_id, &op)
+                    .expect("approval resolution should serialize")
+                    .expect("approval should remain pending on its own thread");
+                assert_eq!(
+                    resolution.request_id,
+                    AppServerRequestId::Integer(request_id)
+                );
+            }
+        }
     }
 
     #[test]
@@ -624,22 +743,25 @@ mod tests {
         );
 
         let permissions = pending
-            .take_resolution(&Op::RequestPermissionsResponse {
-                id: "perm-1".to_string(),
-                response: codex_protocol::request_permissions::RequestPermissionsResponse {
-                    permissions: RequestPermissionProfile {
-                        network: Some(NetworkPermissions {
-                            enabled: Some(true),
-                        }),
-                        file_system: Some(FileSystemPermissions::from_read_write_roots(
-                            Some(vec![absolute_path(read_path)]),
-                            Some(vec![absolute_path(write_path)]),
-                        )),
+            .take_resolution(
+                "thread-1",
+                &Op::RequestPermissionsResponse {
+                    id: "perm-1".to_string(),
+                    response: codex_protocol::request_permissions::RequestPermissionsResponse {
+                        permissions: RequestPermissionProfile {
+                            network: Some(NetworkPermissions {
+                                enabled: Some(true),
+                            }),
+                            file_system: Some(FileSystemPermissions::from_read_write_roots(
+                                Some(vec![absolute_path(read_path)]),
+                                Some(vec![absolute_path(write_path)]),
+                            )),
+                        },
+                        scope: codex_protocol::request_permissions::PermissionGrantScope::Session,
+                        strict_auto_review: false,
                     },
-                    scope: codex_protocol::request_permissions::PermissionGrantScope::Session,
-                    strict_auto_review: false,
                 },
-            })
+            )
             .expect("permissions response should serialize")
             .expect("permissions request should be pending");
         assert_eq!(permissions.request_id, AppServerRequestId::Integer(7));
@@ -677,18 +799,21 @@ mod tests {
         );
 
         let user_input = pending
-            .take_resolution(&Op::UserInputAnswer {
-                id: "turn-2".to_string(),
-                response: ToolRequestUserInputResponse {
-                    answers: std::iter::once((
-                        "question".to_string(),
-                        ToolRequestUserInputAnswer {
-                            answers: vec!["yes".to_string()],
-                        },
-                    ))
-                    .collect(),
+            .take_resolution(
+                "thread-1",
+                &Op::UserInputAnswer {
+                    id: "turn-2".to_string(),
+                    response: ToolRequestUserInputResponse {
+                        answers: std::iter::once((
+                            "question".to_string(),
+                            ToolRequestUserInputAnswer {
+                                answers: vec!["yes".to_string()],
+                            },
+                        ))
+                        .collect(),
+                    },
                 },
-            })
+            )
             .expect("user input response should serialize")
             .expect("user input request should be pending");
         assert_eq!(user_input.request_id, AppServerRequestId::Integer(8));
@@ -734,13 +859,16 @@ mod tests {
         );
 
         let resolution = pending
-            .take_resolution(&Op::ResolveElicitation {
-                server_name: "example".to_string(),
-                request_id: AppServerRequestId::Integer(12),
-                decision: McpServerElicitationAction::Accept,
-                content: Some(json!({ "answer": "yes" })),
-                meta: Some(json!({ "source": "tui" })),
-            })
+            .take_resolution(
+                "thread-1",
+                &Op::ResolveElicitation {
+                    server_name: "example".to_string(),
+                    request_id: AppServerRequestId::Integer(12),
+                    decision: McpServerElicitationAction::Accept,
+                    content: Some(json!({ "answer": "yes" })),
+                    meta: Some(json!({ "source": "tui" })),
+                },
+            )
             .expect("elicitation response should serialize")
             .expect("elicitation request should be pending");
 
@@ -752,30 +880,6 @@ mod tests {
                 "content": { "answer": "yes" },
                 "_meta": { "source": "tui" }
             })
-        );
-    }
-
-    #[test]
-    fn rejects_dynamic_tool_calls_as_unsupported() {
-        let mut pending = PendingAppServerRequests::default();
-        let unsupported = pending
-            .note_server_request(&ServerRequest::DynamicToolCall {
-                request_id: AppServerRequestId::Integer(99),
-                params: codex_app_server_protocol::DynamicToolCallParams {
-                    thread_id: "thread-1".to_string(),
-                    turn_id: "turn-1".to_string(),
-                    call_id: "tool-1".to_string(),
-                    namespace: None,
-                    tool: "tool".to_string(),
-                    arguments: json!({}),
-                },
-            })
-            .expect("dynamic tool calls should be rejected");
-
-        assert_eq!(unsupported.request_id, AppServerRequestId::Integer(99));
-        assert_eq!(
-            unsupported.message,
-            "Dynamic tool calls are not available in TUI yet."
         );
     }
 
@@ -814,10 +918,13 @@ mod tests {
         );
 
         let resolution = pending
-            .take_resolution(&Op::PatchApproval {
-                id: "patch-1".to_string(),
-                decision: FileChangeApprovalDecision::Cancel,
-            })
+            .take_resolution(
+                "thread-1",
+                &Op::PatchApproval {
+                    id: "patch-1".to_string(),
+                    decision: FileChangeApprovalDecision::Cancel,
+                },
+            )
             .expect("resolution should serialize")
             .expect("request should be pending");
 
@@ -828,11 +935,12 @@ mod tests {
     #[test]
     fn resolve_notification_returns_resolved_exec_request() {
         let mut pending = PendingAppServerRequests::default();
+        let thread_id = codex_protocol::ThreadId::new().to_string();
         assert_eq!(
             pending.note_server_request(&ServerRequest::CommandExecutionRequestApproval {
                 request_id: AppServerRequestId::Integer(41),
                 params: CommandExecutionRequestApprovalParams {
-                    thread_id: "thread-1".to_string(),
+                    thread_id: thread_id.to_ascii_uppercase(),
                     turn_id: "turn-1".to_string(),
                     item_id: "call-1".to_string(),
                     started_at_ms: 0,
@@ -853,13 +961,17 @@ mod tests {
         );
 
         assert_eq!(
-            pending.resolve_notification(&AppServerRequestId::Integer(41)),
+            pending.resolve_notification(
+                &thread_id.replace('-', ""),
+                &AppServerRequestId::Integer(41)
+            ),
             Some(ResolvedAppServerRequest::ExecApproval {
+                thread_id: thread_id.clone(),
                 id: "approval-1".to_string(),
             })
         );
         assert_eq!(
-            pending.resolve_notification(&AppServerRequestId::Integer(41)),
+            pending.resolve_notification(&thread_id, &AppServerRequestId::Integer(41)),
             None
         );
     }
@@ -890,7 +1002,7 @@ mod tests {
         );
 
         assert_eq!(
-            pending.resolve_notification(&AppServerRequestId::Integer(12)),
+            pending.resolve_notification("thread-1", &AppServerRequestId::Integer(12)),
             Some(ResolvedAppServerRequest::McpElicitation {
                 server_name: "example".to_string(),
                 request_id: AppServerRequestId::Integer(12),
@@ -914,7 +1026,7 @@ mod tests {
         });
 
         assert_eq!(
-            pending.resolve_notification(&AppServerRequestId::Integer(8)),
+            pending.resolve_notification("thread-1", &AppServerRequestId::Integer(8)),
             Some(ResolvedAppServerRequest::UserInput {
                 call_id: "tool-1".to_string(),
             })
@@ -942,17 +1054,23 @@ mod tests {
             answers: HashMap::new(),
         };
         let first_response = pending
-            .take_resolution(&Op::UserInputAnswer {
-                id: "turn-1".to_string(),
-                response: response.clone(),
-            })
+            .take_resolution(
+                "thread-1",
+                &Op::UserInputAnswer {
+                    id: "turn-1".to_string(),
+                    response: response.clone(),
+                },
+            )
             .expect("user input response should serialize")
             .expect("first user input request should be pending");
         let second_response = pending
-            .take_resolution(&Op::UserInputAnswer {
-                id: "turn-1".to_string(),
-                response,
-            })
+            .take_resolution(
+                "thread-1",
+                &Op::UserInputAnswer {
+                    id: "turn-1".to_string(),
+                    response,
+                },
+            )
             .expect("user input response should serialize")
             .expect("second user input request should be pending");
 

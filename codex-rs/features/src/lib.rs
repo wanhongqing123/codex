@@ -21,6 +21,10 @@ pub use feature_configs::CodeModeHostConfigToml;
 pub use feature_configs::CurrentTimeReminderConfigToml;
 pub use feature_configs::CurrentTimeReminderDeliveryMode;
 pub use feature_configs::CurrentTimeSource;
+pub use feature_configs::GuardianV2ConfigToml;
+pub use feature_configs::GuardianV2ReviewScopeConfigToml;
+pub use feature_configs::GuardianV2TranscriptConfigToml;
+pub use feature_configs::GuardianV2TranscriptSource;
 pub use feature_configs::MultiAgentV2ConfigToml;
 pub use feature_configs::NetworkProxyConfigToml;
 pub use feature_configs::NetworkProxyDomainPermissionToml;
@@ -141,8 +145,12 @@ pub enum Feature {
     UseLegacyLandlock,
     /// Experimental shell snapshotting.
     ShellSnapshot,
+    /// Keep policy-filtered shell snapshots entirely in executor memory.
+    ShellSnapshotV2,
     /// Allow turns to start while selected executors are still starting.
     DeferredExecutor,
+    /// Use the current working directory for turn diff display paths.
+    CwdRelativeTurnDiffs,
     /// Enable runtime metrics snapshots via a manual reader.
     RuntimeMetrics,
     /// Enable startup memory extraction and file-backed memory consolidation.
@@ -157,6 +165,8 @@ pub enum Feature {
     Chronicle,
     /// Compress request bodies (zstd) when sending streaming requests to codex-backend.
     EnableRequestCompression,
+    /// Keep active sampling turns alive until a failed network connection recovers.
+    UnboundedConnectionRetries,
     /// Start the managed network proxy for sandboxed sessions.
     NetworkProxy,
     /// Respect host system proxy settings for Codex-owned network clients.
@@ -171,6 +181,8 @@ pub enum Feature {
     SpawnCsv,
     /// Enable apps.
     Apps,
+    /// Route first-party ChatGPT requests through PSP.
+    Psp,
     /// Enable MCP apps.
     EnableMcpApps,
     /// Enable MCP protocol version 2026-07-28 support.
@@ -199,6 +211,14 @@ pub enum Feature {
     ///
     /// Requirements-only gate: this should be set from requirements, not user config.
     InAppBrowser,
+    /// Allow the in-app chat pane in desktop apps.
+    ///
+    /// Requirements-only gate: this should be set from requirements, not user config.
+    InAppChat,
+    /// Allow in-app dictation in desktop apps.
+    ///
+    /// Requirements-only gate: this should be set from requirements, not user config.
+    InAppDictation,
     /// Allow desktop apps to perform in-app updates.
     ///
     /// Requirements-only gate: this should be set from requirements, not user config.
@@ -247,12 +267,20 @@ pub enum Feature {
     MentionsV2,
     /// Allow request_user_input in Default collaboration mode.
     DefaultModeRequestUserInput,
+    /// Removed compatibility flag for model-enabled async user messaging.
+    SendAsyncMessage,
     /// Enable automatic review for approval prompts.
     GuardianApproval,
     /// Reuse encrypted parent compaction when restarting Guardian review sessions.
     GuardianReuseParentCompaction,
+    /// Include completed node_repl or cua_repl Code Mode responses in Guardian reviews.
+    GuardianEnhancedNodeReplTranscripts,
+    /// Include completed node_repl or cua_repl Code Mode response images in Guardian reviews.
+    GuardianNodeReplTranscriptImages,
     /// Enable Guardian V2 automatic approval reviews.
     GuardianV2,
+    /// Enable the extension-owned synchronous Guardian reviewer.
+    GuardianExt,
     /// Enable persisted thread goals and automatic goal continuation.
     Goals,
     /// Add current context-window metadata to model-visible context.
@@ -277,6 +305,10 @@ pub enum Feature {
     PreventIdleSleep,
     /// Enable remote compaction v2 over the normal Responses API.
     RemoteCompactionV2,
+    /// Include retained images in the remote compaction context budget.
+    CompactionImageBudget,
+    /// Retain client-authored developer messages across compacted context windows.
+    RetainClientDeveloperMessages,
     /// Use Agent Identity for ChatGPT-authenticated sessions.
     UseAgentIdentity,
     /// Enable workspace dependency support.
@@ -681,6 +713,12 @@ pub struct FeaturesToml {
     pub code_mode_host: Option<FeatureToml<CodeModeHostConfigToml>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub non_prefixed_mcp_tool_names: Option<FeatureToml<NonPrefixedMcpToolNamesConfigToml>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "feature_configs::deserialize_guardian_v2_feature"
+    )]
+    pub guardianv2: Option<FeatureToml<GuardianV2ConfigToml>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_agent_v2: Option<FeatureToml<MultiAgentV2ConfigToml>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -706,13 +744,6 @@ impl Features {
 }
 
 impl FeaturesToml {
-    /// Removes compatibility-only inputs that no longer affect runtime
-    /// behavior or belong in newly materialized config.
-    pub fn clear_removed_compatibility_entries(&mut self) {
-        self.removed_apps_mcp_path_override = None;
-        self.entries.remove("apps_mcp_path_override");
-    }
-
     pub fn entries(&self) -> BTreeMap<String, bool> {
         let mut entries = self.entries.clone();
         if let Some(enabled) = self.code_mode.as_ref().and_then(FeatureToml::enabled) {
@@ -727,6 +758,9 @@ impl FeaturesToml {
             .and_then(FeatureToml::enabled)
         {
             entries.insert(Feature::NonPrefixedMcpToolNames.key().to_string(), enabled);
+        }
+        if let Some(enabled) = self.guardianv2.as_ref().and_then(FeatureToml::enabled) {
+            entries.insert(Feature::GuardianV2.key().to_string(), enabled);
         }
         if let Some(enabled) = self.multi_agent_v2.as_ref().and_then(FeatureToml::enabled) {
             entries.insert(Feature::MultiAgentV2.key().to_string(), enabled);
@@ -748,58 +782,6 @@ impl FeaturesToml {
             entries.insert(Feature::NetworkProxy.key().to_string(), enabled);
         }
         entries
-    }
-
-    pub fn materialize_resolved_enabled(&mut self, features: &Features) {
-        self.clear_removed_compatibility_entries();
-        let Self {
-            tool_registry: _,
-            code_mode,
-            code_mode_host,
-            non_prefixed_mcp_tool_names,
-            multi_agent_v2,
-            token_budget,
-            rollout_budget,
-            current_time_reminder,
-            removed_apps_mcp_path_override: _,
-            network_proxy,
-            entries,
-        } = self;
-        for key in legacy::legacy_feature_keys() {
-            entries.remove(key);
-        }
-        for spec in FEATURES {
-            let enabled = features.enabled(spec.id);
-            if spec.id == Feature::CodeMode {
-                materialize_resolved_feature_enabled(code_mode, enabled);
-            } else if spec.id == Feature::CodeModeHost {
-                materialize_resolved_feature_enabled(code_mode_host, enabled);
-            } else if spec.id == Feature::NonPrefixedMcpToolNames {
-                materialize_resolved_feature_enabled(non_prefixed_mcp_tool_names, enabled);
-            } else if spec.id == Feature::MultiAgentV2 {
-                materialize_resolved_feature_enabled(multi_agent_v2, enabled);
-            } else if spec.id == Feature::TokenBudget {
-                materialize_resolved_feature_enabled(token_budget, enabled);
-            } else if spec.id == Feature::RolloutBudget {
-                materialize_resolved_feature_enabled(rollout_budget, enabled);
-            } else if spec.id == Feature::CurrentTimeReminder {
-                materialize_resolved_feature_enabled(current_time_reminder, enabled);
-            } else if spec.id == Feature::NetworkProxy {
-                materialize_resolved_feature_enabled(network_proxy, enabled);
-            } else {
-                entries.insert(spec.key.to_string(), enabled);
-            }
-        }
-    }
-}
-
-fn materialize_resolved_feature_enabled<T: FeatureConfig>(
-    feature: &mut Option<FeatureToml<T>>,
-    enabled: bool,
-) {
-    match feature {
-        Some(feature) => feature.set_enabled(enabled),
-        None => *feature = Some(FeatureToml::Enabled(enabled)),
     }
 }
 
@@ -828,20 +810,12 @@ impl<T: FeatureConfig> FeatureToml<T> {
             Self::Config(config) => config.enabled(),
         }
     }
-
-    pub fn set_enabled(&mut self, enabled: bool) {
-        match self {
-            Self::Enabled(value) => *value = enabled,
-            Self::Config(config) => config.set_enabled(enabled),
-        }
-    }
 }
 
 // A trait to be implemented by custom feature config structs when defining a feature that needs more configuration than
 // just enabled/disabled.
 pub trait FeatureConfig {
     fn enabled(&self) -> Option<bool>;
-    fn set_enabled(&mut self, enabled: bool);
 }
 
 /// Single, easy-to-read registry of all feature definitions.
@@ -883,7 +857,7 @@ pub const FEATURES: &[FeatureSpec] = &[
         id: Feature::UnifiedExec,
         key: "unified_exec",
         stage: Stage::Stable,
-        default_enabled: !cfg!(windows),
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::ShellZshFork,
@@ -894,8 +868,8 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::UnifiedExecZshFork,
         key: "unified_exec_zsh_fork",
-        stage: Stage::UnderDevelopment,
-        default_enabled: false,
+        stage: Stage::Removed,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::ShellSnapshot,
@@ -904,8 +878,20 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: true,
     },
     FeatureSpec {
+        id: Feature::ShellSnapshotV2,
+        key: "shell_snapshot_v2",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::DeferredExecutor,
         key: "deferred_executor",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::CwdRelativeTurnDiffs,
+        key: "cwd_relative_turn_diffs",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
@@ -1114,6 +1100,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: true,
     },
     FeatureSpec {
+        id: Feature::UnboundedConnectionRetries,
+        key: "unbounded_connection_retries",
+        stage: Stage::Stable,
+        default_enabled: true,
+    },
+    FeatureSpec {
         id: Feature::NetworkProxy,
         key: "network_proxy",
         stage: Stage::Experimental {
@@ -1158,6 +1150,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "apps",
         stage: Stage::Stable,
         default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::Psp,
+        key: "psp",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::EnableMcpApps,
@@ -1240,6 +1238,18 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::InAppBrowser,
         key: "in_app_browser",
+        stage: Stage::Stable,
+        default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::InAppChat,
+        key: "in_app_chat",
+        stage: Stage::Stable,
+        default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::InAppDictation,
+        key: "in_app_dictation",
         stage: Stage::Stable,
         default_enabled: true,
     },
@@ -1364,6 +1374,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: false,
     },
     FeatureSpec {
+        id: Feature::SendAsyncMessage,
+        key: "send_async_message",
+        stage: Stage::Removed,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::TerminalVisualizationInstructions,
         key: "terminal_visualization_instructions",
         stage: Stage::UnderDevelopment,
@@ -1382,8 +1398,26 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: false,
     },
     FeatureSpec {
+        id: Feature::GuardianEnhancedNodeReplTranscripts,
+        key: "guardian_enhanced_node_repl_transcripts",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::GuardianNodeReplTranscriptImages,
+        key: "guardian_node_repl_transcript_images",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::GuardianV2,
         key: "guardianv2",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::GuardianExt,
+        key: "guardian_ext",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
@@ -1512,6 +1546,18 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "remote_compaction_v2",
         stage: Stage::Stable,
         default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::CompactionImageBudget,
+        key: "compaction_image_budget",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::RetainClientDeveloperMessages,
+        key: "retain_client_developer_messages",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::UseAgentIdentity,

@@ -4,6 +4,7 @@ use crate::ThreadManager;
 use crate::config::AgentRoleConfig;
 use crate::config::DEFAULT_AGENT_MAX_DEPTH;
 use crate::config::PermissionProfileSnapshot;
+use crate::environment_selection::EnvironmentConfigOrigin;
 use crate::environment_selection::TurnEnvironmentState;
 use crate::function_tool::FunctionCallError;
 use crate::init_state_db;
@@ -23,6 +24,8 @@ use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandle
 use crate::turn_diff_tracker::TurnDiffTracker;
 use codex_extension_api::empty_extension_registry;
 use codex_features::Feature;
+use codex_history::InitialHistory;
+use codex_history::RolloutItem;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_model_provider::create_model_provider;
@@ -32,6 +35,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::ShellEnvironmentPolicy;
+use codex_protocol::items::TurnItem;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::BaseInstructionsProvenance;
@@ -49,11 +53,10 @@ use codex_protocol::protocol::FileSystemAccessMode;
 use codex_protocol::protocol::FileSystemPath;
 use codex_protocol::protocol::FileSystemSandboxEntry;
 use codex_protocol::protocol::FileSystemSandboxPolicy;
-use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::NetworkSandboxPolicy;
 use codex_protocol::protocol::Op;
-use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -102,6 +105,27 @@ fn function_payload(args: serde_json::Value) -> ToolPayload {
 
 fn parse_agent_id(id: &str) -> ThreadId {
     ThreadId::from_string(id).expect("agent id should be valid")
+}
+
+async fn wait_for_recorded_user_input(thread: &crate::CodexThread, expected: &[UserInput]) {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let event = thread
+                .next_event()
+                .await
+                .expect("event stream should stay open");
+            if let EventMsg::ItemCompleted(ItemCompletedEvent {
+                item: TurnItem::UserMessage(item),
+                ..
+            }) = event.msg
+            {
+                assert_eq!(item.content, expected);
+                return;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for recorded user input");
 }
 
 fn thread_manager() -> ThreadManager {
@@ -896,6 +920,7 @@ async fn multi_agent_v2_spawn_partial_fork_turns_allows_agent_type_override() {
         multi_agent_version: codex_protocol::protocol::MultiAgentVersion::V2,
         ..turn
     };
+    let parent_provider_id = turn.config.model_provider_id.clone();
 
     let output = SpawnAgentHandlerV2::default()
         .handle(invocation(
@@ -929,7 +954,7 @@ async fn multi_agent_v2_spawn_partial_fork_turns_allows_agent_type_override() {
         .await;
 
     assert_eq!(snapshot.model, "gpt-5-role-override");
-    assert_eq!(snapshot.model_provider_id, "ollama");
+    assert_eq!(snapshot.model_provider_id, parent_provider_id);
     assert_eq!(snapshot.reasoning_effort, Some(ReasoningEffort::Minimal));
 }
 
@@ -2220,6 +2245,8 @@ async fn multi_agent_v2_spawn_surfaces_task_name_validation_errors() {
     );
 }
 
+// TODO(anp): Restore this test on Linux once sandbox helpers work inside test microVMs.
+#[cfg_attr(target_os = "linux", ignore)]
 #[tokio::test]
 async fn spawn_agent_reapplies_runtime_sandbox_after_role_config() {
     #[derive(Debug, Deserialize)]
@@ -2229,7 +2256,18 @@ async fn spawn_agent_reapplies_runtime_sandbox_after_role_config() {
     }
 
     let (mut session, mut turn) = make_session_and_context().await;
-    let manager = thread_manager();
+    let server = core_test_support::responses::start_mock_server().await;
+    let sandbox_runtime = core_test_support::test_codex::test_codex()
+        .build_with_auto_env(&server)
+        .await
+        .expect("sandbox-capable test environment should start");
+    let environment_manager = sandbox_runtime.thread_manager.environment_manager();
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        built_in_model_providers(/*openai_base_url*/ None)["openai"].clone(),
+        turn.config.codex_home.to_path_buf(),
+        Arc::clone(&environment_manager),
+    );
     session.services.agent_control = manager.agent_control();
     let expected_sandbox = turn.config.legacy_sandbox_policy();
     #[allow(deprecated)]
@@ -2241,7 +2279,13 @@ async fn spawn_agent_reapplies_runtime_sandbox_after_role_config() {
             path: FileSystemPath::GlobPattern {
                 pattern: "**/.env".to_string(),
             },
-            access: FileSystemAccessMode::Deny,
+            // TODO(anp): Configure this fixture with the elevated Windows backend so it can
+            // enforce denied reads while reapplying the owner's restrictive policy.
+            access: if cfg!(windows) {
+                FileSystemAccessMode::Read
+            } else {
+                FileSystemAccessMode::Deny
+            },
             missing_path_behavior: None,
         });
     let expected_network_sandbox_policy = NetworkSandboxPolicy::from(&expected_sandbox);
@@ -2275,8 +2319,12 @@ async fn spawn_agent_reapplies_runtime_sandbox_after_role_config() {
     else {
         panic!("parent environment should be ready");
     };
-    environment.config.permission_profile =
+    environment.environment = environment_manager
+        .default_environment()
+        .expect("sandbox-capable test environment should exist");
+    environment.config_mut().permission_profile =
         PermissionProfileSnapshot::legacy(expected_permission_profile.clone());
+    environment.config_origin = EnvironmentConfigOrigin::Owner;
     assert_ne!(
         role_config.permissions.effective_permission_profile(),
         expected_permission_profile,
@@ -2284,7 +2332,7 @@ async fn spawn_agent_reapplies_runtime_sandbox_after_role_config() {
     );
     assert_ne!(
         expected_permission_profile,
-        turn.permission_profile(),
+        turn.config.permissions.effective_permission_profile(),
         "test requires an environment profile that differs from the thread profile"
     );
 
@@ -2336,6 +2384,10 @@ async fn spawn_agent_reapplies_runtime_sandbox_after_role_config() {
         expected_network_sandbox_policy
     );
     assert_eq!(child_turn.permission_profile(), expected_permission_profile);
+    assert_ne!(
+        child_turn.config.permissions.permission_profile(),
+        &expected_permission_profile
+    );
 }
 
 #[tokio::test]
@@ -2582,9 +2634,16 @@ async fn send_input_interrupts_before_prompt() {
         .iter()
         .filter_map(|(id, op)| (*id == agent_id).then_some(op))
         .collect();
-    assert_eq!(ops_for_agent.len(), 2);
+    assert_eq!(ops_for_agent.len(), 1);
     assert!(matches!(ops_for_agent[0], Op::Interrupt));
-    assert!(matches!(ops_for_agent[1], Op::UserInput { .. }));
+    wait_for_recorded_user_input(
+        thread.thread.as_ref(),
+        &[UserInput::Text {
+            text: "hi".to_string(),
+            text_elements: Vec::new(),
+        }],
+    )
+    .await;
 
     let _ = thread
         .thread
@@ -2621,8 +2680,9 @@ async fn send_input_accepts_structured_items() {
         .await
         .expect("send_input should succeed");
 
-    let expected = Op::UserInput {
-        items: vec![
+    wait_for_recorded_user_input(
+        thread.thread.as_ref(),
+        &[
             UserInput::Mention {
                 name: "drive".to_string(),
                 path: "app://google_drive".to_string(),
@@ -2632,16 +2692,8 @@ async fn send_input_accepts_structured_items() {
                 text_elements: Vec::new(),
             },
         ],
-        final_output_json_schema: None,
-        responsesapi_client_metadata: None,
-        additional_context: Default::default(),
-        thread_settings: Default::default(),
-    };
-    let captured = manager
-        .captured_ops()
-        .into_iter()
-        .find(|(id, op)| *id == agent_id && *op == expected);
-    assert_eq!(captured, Some((agent_id, expected)));
+    )
+    .await;
 
     let _ = thread
         .thread
@@ -2737,15 +2789,18 @@ async fn resume_agent_restores_closed_agent_and_accepts_send_input() {
     let thread = manager
         .resume_thread_with_history(
             config.clone(),
-            InitialHistory::Forked(vec![RolloutItem::ResponseItem(ResponseItem::Message {
-                id: None,
-                role: "user".to_string(),
-                content: vec![ContentItem::InputText {
-                    text: "materialized".to_string(),
-                }],
-                phase: None,
-                internal_chat_message_metadata_passthrough: None,
-            })]),
+            InitialHistory::Forked(vec![RolloutItem::ResponseItem(
+                ResponseItem::Message {
+                    id: None,
+                    role: "user".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "materialized".to_string(),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                }
+                .into(),
+            )]),
             AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy")),
             /*parent_trace*/ None,
             ClientMcpExtensions::default(),
@@ -2969,6 +3024,7 @@ async fn multi_agent_v2_wait_agent_accepts_timeout_only_argument() {
                 /*trigger_turn*/ false,
             ),
             /*parent_turn_id*/ None,
+            /*root_turn_id*/ None,
         )
         .await;
 
@@ -3473,6 +3529,7 @@ async fn multi_agent_v2_wait_agent_returns_summary_for_mailbox_activity() {
                 /*trigger_turn*/ false,
             ),
             /*parent_turn_id*/ None,
+            /*root_turn_id*/ None,
         )
         .await;
 
@@ -3549,6 +3606,7 @@ async fn multi_agent_v2_wait_agent_returns_for_already_queued_mail() {
                 /*trigger_turn*/ false,
             ),
             /*parent_turn_id*/ None,
+            /*root_turn_id*/ None,
         )
         .await;
 
@@ -3651,6 +3709,7 @@ async fn multi_agent_v2_wait_agent_wakes_on_any_mailbox_notification() {
                 /*trigger_turn*/ false,
             ),
             /*parent_turn_id*/ None,
+            /*root_turn_id*/ None,
         )
         .await;
 
@@ -3742,6 +3801,7 @@ async fn multi_agent_v2_wait_agent_does_not_return_completed_content() {
                 /*trigger_turn*/ false,
             ),
             /*parent_turn_id*/ None,
+            /*root_turn_id*/ None,
         )
         .await;
 
@@ -4209,6 +4269,10 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
     let mut config = turn.config.as_ref().clone();
     config.agent_max_depth = 3;
     config
+        .permissions
+        .set_permission_profile(PermissionProfile::workspace_write())
+        .expect("test config should allow workspace writes");
+    config
         .features
         .enable(Feature::Sqlite)
         .expect("test config should allow sqlite");
@@ -4237,6 +4301,22 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
         .expect("parent thread should start");
     let parent_thread_id = parent.thread_id;
     let parent_session = parent.thread.session.clone();
+    let parent_turn = parent_session.new_default_turn().await;
+    let mut owner_config = parent_turn
+        .environments
+        .primary()
+        .expect("parent should have an environment")
+        .config()
+        .clone();
+    let owner_permission_profile = PermissionProfile::read_only();
+    owner_config.permission_profile =
+        PermissionProfileSnapshot::legacy(owner_permission_profile.clone());
+    let parent_environment = parent.thread.environment_selections().await.remove(0);
+    parent
+        .thread
+        .environment_ready(&parent_environment, owner_config)
+        .await
+        .expect("owner environment should be installed");
 
     let child_turn = parent_session.new_default_turn().await;
     let child_spawn_output = SpawnAgentHandler::default()
@@ -4327,6 +4407,16 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
     assert_ne!(
         manager.agent_control().get_status(child_thread_id).await,
         AgentStatus::NotFound
+    );
+    assert_eq!(
+        manager
+            .get_thread(child_thread_id)
+            .await
+            .expect("resumed child thread should exist")
+            .config_snapshot()
+            .await
+            .permission_profile,
+        owner_permission_profile
     );
     assert_ne!(
         manager
@@ -4487,8 +4577,7 @@ async fn build_agent_spawn_config_uses_turn_context_values() {
         .set(AskForApproval::OnRequest)
         .expect("approval policy set");
 
-    let config = build_agent_spawn_config(&base_instructions, &turn, turn.environments.primary())
-        .expect("spawn config");
+    let config = build_agent_spawn_config(&base_instructions, &turn).expect("spawn config");
     let mut expected = (*turn.config).clone();
     expected.base_instructions_provenance = base_instructions.provenance.clone();
     expected.base_instructions = Some(base_instructions.text);
@@ -4506,10 +4595,6 @@ async fn build_agent_spawn_config_uses_turn_context_values() {
         .approval_policy
         .set(AskForApproval::OnRequest)
         .expect("approval policy set");
-    expected
-        .permissions
-        .set_permission_profile(turn.permission_profile())
-        .expect("permission profile set");
     assert_eq!(config, expected);
 }
 
@@ -4541,11 +4626,10 @@ async fn build_agent_resume_config_clears_base_instructions() {
     else {
         panic!("parent environment should be ready");
     };
-    environment.config.permission_profile =
-        PermissionProfileSnapshot::legacy(environment_permission_profile.clone());
+    environment.config_mut().permission_profile =
+        PermissionProfileSnapshot::legacy(environment_permission_profile);
 
-    let config =
-        build_agent_resume_config(&turn, turn.environments.primary()).expect("resume config");
+    let config = build_agent_resume_config(&turn).expect("resume config");
 
     let mut expected = (*turn.config).clone();
     expected.base_instructions = None;
@@ -4564,9 +4648,5 @@ async fn build_agent_resume_config_clears_base_instructions() {
         .approval_policy
         .set(AskForApproval::OnRequest)
         .expect("approval policy set");
-    expected
-        .permissions
-        .set_permission_profile(environment_permission_profile)
-        .expect("permission profile set");
     assert_eq!(config, expected);
 }

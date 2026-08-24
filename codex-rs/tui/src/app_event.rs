@@ -16,6 +16,7 @@ use crate::inline_visualization::InlineVisualizationContext;
 use codex_app_server_protocol::AddCreditsNudgeCreditType;
 use codex_app_server_protocol::AddCreditsNudgeEmailStatus;
 use codex_app_server_protocol::ConsumeAccountRateLimitResetCreditResponse;
+use codex_app_server_protocol::DynamicToolCallResponse;
 use codex_app_server_protocol::GetAccountRateLimitsResponse;
 use codex_app_server_protocol::GetAccountTokenUsageResponse;
 use codex_app_server_protocol::MarketplaceAddResponse;
@@ -29,6 +30,7 @@ use codex_app_server_protocol::PluginMarketplaceEntry;
 use codex_app_server_protocol::PluginReadParams;
 use codex_app_server_protocol::PluginReadResponse;
 use codex_app_server_protocol::PluginUninstallResponse;
+use codex_app_server_protocol::RequestId as AppServerRequestId;
 use codex_app_server_protocol::SkillsListResponse;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadGoalStatus;
@@ -40,6 +42,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ModelPreset;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_approval_presets::ApprovalPreset;
+use strum_macros::IntoStaticStr;
 use uuid::Uuid;
 
 use crate::app_command::AppCommand;
@@ -47,6 +50,8 @@ use crate::app_server_session::AppServerStartedThread;
 use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::StatusLineItem;
 use crate::bottom_pane::TerminalTitleItem;
+use crate::chatwidget::ConnectorScopeGeneration;
+use crate::chatwidget::ThreadUsageOutcome;
 use crate::chatwidget::UserMessage;
 use crate::goal_files::GoalDraft;
 use codex_app_server_protocol::AskForApproval;
@@ -192,8 +197,41 @@ pub(crate) enum TranscriptExportDestination {
 }
 
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug)]
+#[derive(Debug, IntoStaticStr)]
 pub(crate) enum AppEvent {
+    /// Open the daemon-wide overview of loaded root sessions.
+    OpenAgentsOverview,
+    /// Update the daemon-wide overview after a background thread listing finishes.
+    AgentsOverviewThreadsLoaded {
+        request_id: Uuid,
+        result: Result<Vec<Thread>, String>,
+    },
+    /// Switch to a root session selected from the shared dashboard.
+    SelectAgentsOverviewThread {
+        thread_id: ThreadId,
+    },
+    /// Start a background task directly from the shared dashboard.
+    DispatchAgentsOverviewTask {
+        prompt: String,
+        cwd: Option<AbsolutePathBuf>,
+    },
+    /// Rename a task directly from the shared dashboard.
+    RenameAgentsOverviewThread {
+        thread_id: ThreadId,
+        name: String,
+    },
+    /// Interrupt a task directly from the shared dashboard.
+    StopAgentsOverviewThread {
+        thread_id: ThreadId,
+    },
+    /// Start the shared app-server daemon without moving the current embedded session.
+    #[cfg(unix)]
+    StartAgentsDaemon,
+    /// Report whether starting the shared app-server daemon succeeded.
+    #[cfg(unix)]
+    AgentsDaemonStarted {
+        result: Result<(), String>,
+    },
     /// Open the agent picker for switching active threads.
     OpenAgentPicker,
     /// Merge a completed root-scoped agent-picker refresh without blocking terminal input.
@@ -255,6 +293,12 @@ pub(crate) enum AppEvent {
         destination: TranscriptExportDestination,
     },
 
+    /// Copy a picker selection while retaining its clipboard lease in the chat widget.
+    CopySelection {
+        text: Arc<str>,
+        label: String,
+    },
+
     /// Persist a submitted prompt in the cross-session message history.
     AppendMessageHistoryEntry {
         thread_id: ThreadId,
@@ -265,6 +309,7 @@ pub(crate) enum AppEvent {
     SyncThreadGitBranch {
         thread_id: ThreadId,
         branch: String,
+        cwd: PathBuf,
     },
 
     /// Fetch a persistent cross-session message history entry by offset.
@@ -286,9 +331,33 @@ pub(crate) enum AppEvent {
         name: Option<String>,
     },
 
+    /// Change the working directory of the originating idle primary thread.
+    ChangeWorkingDirectory {
+        thread_id: ThreadId,
+        requested_cwd: PathBuf,
+    },
+
     /// Result of the fresh startup thread that is attached after the input UI is live.
     StartupThreadStarted {
         result: Result<AppServerStartedThread, String>,
+    },
+
+    /// Register a dynamically created background thread before its first turn starts.
+    DynamicToolThreadStarted {
+        thread_id: ThreadId,
+        task_tools_available: bool,
+        registered: tokio::sync::oneshot::Sender<()>,
+    },
+
+    /// Return a completed client-owned dynamic tool call to app server.
+    DynamicToolCallCompleted {
+        request_id: AppServerRequestId,
+        response: DynamicToolCallResponse,
+    },
+
+    /// Register task tools inherited by a dynamically created thread.
+    TaskToolsAvailable {
+        thread_id: ThreadId,
     },
 
     /// Clear the terminal UI (screen + scrollback), start a fresh session, and keep the
@@ -427,6 +496,12 @@ pub(crate) enum AppEvent {
     /// background tasks, rollout flush, or child process cleanup).
     Exit(ExitMode),
 
+    /// Apply a choice from the running-task exit menu to its originating thread.
+    RunningTaskExit {
+        action: RunningTaskExitAction,
+        thread_id: ThreadId,
+    },
+
     /// Request app-server account logout, then exit after it succeeds.
     Logout,
 
@@ -455,6 +530,13 @@ pub(crate) enum AppEvent {
     FileSearchResult {
         query: String,
         matches: Vec<FileMatch>,
+    },
+
+    /// Same-host task results for the active unified mention query.
+    TaskSearchResult {
+        thread_id: ThreadId,
+        query: String,
+        matches: Vec<crate::task_mentions::TaskMention>,
     },
 
     /// Refresh account rate limits in the background.
@@ -538,6 +620,19 @@ pub(crate) enum AppEvent {
         result: Result<GetAccountTokenUsageResponse, String>,
     },
 
+    /// Fetch backend-estimated usage for the currently visible enterprise thread.
+    RefreshThreadUsage {
+        thread_id: ThreadId,
+        request_id: u64,
+    },
+
+    /// Result of fetching backend-estimated usage for a specific thread.
+    ThreadUsageLoaded {
+        thread_id: ThreadId,
+        request_id: u64,
+        result: Result<ThreadUsageOutcome, String>,
+    },
+
     /// Fetch workspace messages for the status-line headline item.
     RefreshStatusLineWorkspaceHeadline {
         request_id: u64,
@@ -561,12 +656,23 @@ pub(crate) enum AppEvent {
 
     /// Result of prefetching connectors.
     ConnectorsLoaded {
+        thread_id: Option<ThreadId>,
+        cwd: PathBuf,
+        generation: ConnectorScopeGeneration,
         result: Result<ConnectorsSnapshot, String>,
         is_final: bool,
     },
 
+    /// Thread-scoped installed applications that may actually be mentioned.
+    InstalledConnectorMentionsLoaded {
+        thread_id: Option<ThreadId>,
+        cwd: PathBuf,
+        generation: ConnectorScopeGeneration,
+        result: Result<ConnectorsSnapshot, String>,
+    },
+
     /// Result of computing a `/diff` command.
-    DiffResult(String),
+    DiffResult(PathBuf, String),
 
     /// Open the app link view in the bottom pane.
     OpenAppLink {
@@ -626,9 +732,16 @@ pub(crate) enum AppEvent {
         force_refetch: bool,
     },
 
-    /// Fetch app connector state from the app server after the widget accepts a refresh request.
+    /// Fetch apps only while the originating account, workspace, and thread remain current.
     FetchConnectorsList {
         force_refetch: bool,
+        generation: ConnectorScopeGeneration,
+    },
+
+    /// Refresh callable installed applications without loading the app directory.
+    FetchInstalledConnectorMentions {
+        force_refresh: bool,
+        generation: ConnectorScopeGeneration,
     },
 
     /// Fetch plugin marketplace state for the provided working directory.
@@ -809,6 +922,7 @@ pub(crate) enum AppEvent {
 
     /// Result of refreshing plugin mention bindings.
     PluginMentionsLoaded {
+        cwd: PathBuf,
         plugins: Option<Vec<PluginCapabilitySummary>>,
     },
 
@@ -839,6 +953,7 @@ pub(crate) enum AppEvent {
     /// command path because those callers expect the visible skill state to be current when their command
     /// completes.
     SkillsListLoaded {
+        cwd: PathBuf,
         result: Result<SkillsListResponse, String>,
     },
 
@@ -950,6 +1065,12 @@ pub(crate) enum AppEvent {
         preset: ApprovalPreset,
         return_to_permissions: bool,
         profile_selection: Option<PermissionProfileSelection>,
+    },
+
+    /// Apply a permission shortcut only while its originating thread is displayed.
+    ApplyPermissionShortcut {
+        thread_id: ThreadId,
+        selection: PermissionProfileSelection,
     },
 
     /// Open the Windows world-writable directories warning.
@@ -1283,6 +1404,14 @@ pub(crate) enum ExitMode {
     /// This skips `Op::Shutdown`, so any in-flight work may be dropped and
     /// cleanup that normally runs before `ShutdownComplete` can be missed.
     Immediate,
+}
+
+/// Choice made when leaving a daemon-backed task that is still running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunningTaskExitAction {
+    CancelTask,
+    RunInBackground,
+    Exit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -5,6 +5,7 @@ use std::time::Duration;
 use codex_analytics::CompactionTrigger;
 use codex_analytics::HookRunFact;
 use codex_analytics::build_track_events_context;
+use codex_core_plugins::executor_plugin_hook_sources;
 use codex_hooks::PermissionRequestDecision;
 use codex_hooks::PermissionRequestOutcome;
 use codex_hooks::PermissionRequestRequest;
@@ -19,6 +20,8 @@ use codex_hooks::StopOutcome;
 use codex_hooks::SubagentHookContext;
 use codex_hooks::UserPromptSubmitOutcome;
 use codex_hooks::UserPromptSubmitRequest;
+use codex_hooks::hook_execution_mode_label;
+use codex_hooks::hook_handler_type_label;
 use codex_otel::HOOK_RUN_DURATION_METRIC;
 use codex_otel::HOOK_RUN_METRIC;
 use codex_protocol::items::TurnItem;
@@ -30,6 +33,7 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HookCompletedEvent;
 use codex_protocol::protocol::HookEventName;
 use codex_protocol::protocol::HookExecutionMode;
+use codex_protocol::protocol::HookHandlerType;
 use codex_protocol::protocol::HookOutputEntryKind;
 use codex_protocol::protocol::HookRunStatus;
 use codex_protocol::protocol::HookRunSummary;
@@ -38,20 +42,22 @@ use codex_protocol::protocol::HookStartedEvent;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::WarningEvent;
+use codex_rollout::state_db;
+use codex_thread_store::PersistContext;
 use codex_thread_store::ReadThreadParams;
 use serde_json::Value;
 use tracing::instrument;
 
-use crate::codex_thread::TryStartTurnIfIdleRejectionReason;
 use crate::context::ContextualUserFragment;
 use crate::context::HookAdditionalContext;
 use crate::event_mapping::parse_turn_item;
 use crate::session::TurnInput;
 use crate::session::session::Session;
+use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
 use crate::tools::hook_names::HookToolName;
 use crate::tools::sandboxing::PermissionRequestPayload;
-use crate::user_message_admission::UserMessageAdmissionError;
+use crate::turn_metadata::McpTurnMetadataContext;
 
 pub(crate) struct HookRuntimeOutcome {
     pub should_stop: bool,
@@ -302,10 +308,11 @@ pub(crate) async fn run_post_tool_use_hooks(
 #[instrument(level = "trace", skip_all)]
 pub(crate) async fn run_turn_stop_hooks(
     sess: &Arc<Session>,
-    turn_context: &Arc<TurnContext>,
+    step_context: &Arc<StepContext>,
     stop_hook_active: bool,
     last_assistant_message: Option<String>,
 ) -> StopOutcome {
+    let turn_context = &step_context.turn;
     // Resolve the stop hook kind from the session source before building the
     // request. Root turns run Stop; thread-spawned child turns run SubagentStop.
     let (target, transcript_path) = match &turn_context.session_source {
@@ -350,6 +357,18 @@ pub(crate) async fn run_turn_stop_hooks(
         SessionSource::SubAgent(_) => return StopOutcome::default(),
         _ => (StopHookTarget::Stop, sess.hook_transcript_path().await),
     };
+    let request_metadata = turn_context
+        .turn_metadata_state
+        .current_meta_value_for_mcp_request(McpTurnMetadataContext {
+            model: step_context.model_info.slug.as_str(),
+            reasoning_effort: step_context.reasoning_effort.clone(),
+        })
+        .map(|turn_metadata| {
+            serde_json::Map::from_iter([(
+                crate::X_CODEX_TURN_METADATA_HEADER.to_string(),
+                turn_metadata,
+            )])
+        });
     let request = codex_hooks::StopRequest {
         session_id: sess.session_id().into(),
         turn_id: turn_context.sub_id.clone(),
@@ -358,11 +377,17 @@ pub(crate) async fn run_turn_stop_hooks(
         transcript_path,
         model: turn_context.model_info.slug.clone(),
         permission_mode: hook_permission_mode(turn_context),
+        request_metadata,
         stop_hook_active,
         last_assistant_message,
         target,
     };
-    let hooks = sess.hooks();
+    let executor_hook_sources = step_context
+        .executor_capability_discovery
+        .as_deref()
+        .map(executor_plugin_hook_sources)
+        .unwrap_or_default();
+    let hooks = sess.hooks().with_executor_hooks(executor_hook_sources);
     emit_hook_started_events(sess, turn_context, hooks.preview_stop(&request)).await;
 
     let mut outcome = hooks.run_stop(request).await;
@@ -573,78 +598,25 @@ pub(crate) async fn inspect_pending_input(
     }
 }
 
-#[expect(
-    clippy::await_holding_invalid_type,
-    reason = "durable queue admission must settle before its active turn can be aborted"
-)]
 pub(crate) async fn record_pending_input(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
     pending_input: TurnInput,
     additional_contexts: Vec<String>,
-) -> Result<(), TryStartTurnIfIdleRejectionReason> {
+    persist_context: PersistContext,
+) {
     match pending_input {
         TurnInput::UserInput { content, client_id } => {
-            let awaiting_admission = client_id.as_deref().is_some_and(|client_id| {
-                sess.pending_user_message_admissions
-                    .contains_client_id(client_id)
-            });
-            let mut active = sess.active_turn.lock().await;
-            let input_persisted = active
-                .as_mut()
-                .and_then(|turn| turn.task.as_mut())
-                .filter(|task| Arc::ptr_eq(&task.turn_context, turn_context))
-                .and_then(|task| task.input_persisted.take());
-            if awaiting_admission || input_persisted.is_some() {
-                sess.record_user_prompt_and_emit_turn_item(
-                    turn_context.as_ref(),
-                    content.as_slice(),
-                    client_id.clone(),
-                )
-                .await;
-                record_additional_contexts(sess, turn_context, additional_contexts).await;
-                match sess.flush_rollout().await {
-                    Ok(()) => {
-                        if awaiting_admission && let Some(client_id) = client_id.as_deref() {
-                            sess.pending_user_message_admissions
-                                .complete_persistence(client_id, Ok(()));
-                        }
-                        if let Some(sender) = input_persisted {
-                            let _ = sender.send(Ok(()));
-                        }
-                    }
-                    Err(error) => {
-                        let error = codex_protocol::error::CodexErr::from(error);
-                        sess.send_event(
-                            turn_context.as_ref(),
-                            EventMsg::Error(error.to_error_event(/*message_prefix*/ None)),
-                        )
-                        .await;
-                        if awaiting_admission && let Some(client_id) = client_id.as_deref() {
-                            sess.pending_user_message_admissions.complete_persistence(
-                                client_id,
-                                Err(UserMessageAdmissionError::PersistenceFailed(error)),
-                            );
-                        }
-                        if let Some(sender) = input_persisted {
-                            let _ = sender
-                                .send(Err(TryStartTurnIfIdleRejectionReason::PersistenceFailed));
-                        }
-                        return Err(TryStartTurnIfIdleRejectionReason::PersistenceFailed);
-                    }
-                }
-                return Ok(());
-            }
-            drop(active);
             sess.record_user_prompt_and_emit_turn_item(
                 turn_context.as_ref(),
                 content.as_slice(),
                 client_id,
+                persist_context,
             )
             .await;
         }
         TurnInput::ResponseItem(item) => {
-            sess.record_conversation_items(turn_context, std::slice::from_ref(&item))
+            sess.record_annotated_conversation_items(turn_context, vec![item])
                 .await;
         }
         TurnInput::InterAgentCommunication(communication) => {
@@ -653,32 +625,6 @@ pub(crate) async fn record_pending_input(
         }
     }
     record_additional_contexts(sess, turn_context, additional_contexts).await;
-    Ok(())
-}
-
-pub(crate) async fn reject_pending_input(
-    sess: &Arc<Session>,
-    turn_context: &Arc<TurnContext>,
-    pending_input: &TurnInput,
-) {
-    let TurnInput::UserInput { client_id, .. } = pending_input else {
-        return;
-    };
-    if let Some(client_id) = client_id.as_deref() {
-        sess.pending_user_message_admissions
-            .complete_persistence(client_id, Err(UserMessageAdmissionError::RejectedByHook));
-    }
-    let input_persisted = {
-        let mut active = sess.active_turn.lock().await;
-        active
-            .as_mut()
-            .and_then(|turn| turn.task.as_mut())
-            .filter(|task| Arc::ptr_eq(&task.turn_context, turn_context))
-            .and_then(|task| task.input_persisted.take())
-    };
-    if let Some(sender) = input_persisted {
-        let _ = sender.send(Err(TryStartTurnIfIdleRejectionReason::RejectedByHook));
-    }
 }
 
 /// Processes finished async hook results at a safe turn boundary.
@@ -802,6 +748,23 @@ pub(crate) async fn emit_hook_completed_events(
     turn_context: &Arc<TurnContext>,
     completed_events: Vec<HookCompletedEvent>,
 ) {
+    if turn_context.config.memories.disable_on_external_context
+        && completed_events.iter().any(|completed| {
+            completed.run.handler_type == HookHandlerType::McpTool
+                && matches!(
+                    completed.run.status,
+                    HookRunStatus::Completed | HookRunStatus::Blocked | HookRunStatus::Stopped
+                )
+        })
+    {
+        state_db::mark_thread_memory_mode_polluted(
+            sess.services.state_db.as_deref(),
+            sess.thread_id,
+            "mcp_tool_hook",
+        )
+        .await;
+    }
+
     for completed in completed_events {
         emit_hook_completed_metrics(turn_context, &completed);
         track_hook_completed_analytics(sess, turn_context, &completed);
@@ -858,12 +821,14 @@ fn hook_run_analytics_payload(
         HookRunFact {
             event_name: completed.run.event_name,
             hook_source: completed.run.source,
+            handler_type: completed.run.handler_type,
+            execution_mode: completed.run.execution_mode,
             status: completed.run.status,
         },
     )
 }
 
-fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str); 3] {
+fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str); 5] {
     let hook_name = match run.event_name {
         HookEventName::PreToolUse => "PreToolUse",
         HookEventName::PermissionRequest => "PermissionRequest",
@@ -897,11 +862,15 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str); 
         HookRunStatus::Blocked => "blocked",
         HookRunStatus::Stopped => "stopped",
     };
-
     [
         ("hook_name", hook_name),
         ("source", hook_source),
         ("status", status),
+        ("handler_type", hook_handler_type_label(run.handler_type)),
+        (
+            "execution_mode",
+            hook_execution_mode_label(run.execution_mode),
+        ),
     ]
 }
 
@@ -1068,6 +1037,8 @@ mod tests {
         assert_eq!(tracking.turn_id, "turn-from-hook");
         assert_eq!(tracking.model_slug, turn_context.model_info.slug);
         assert_eq!(hook.event_name, HookEventName::Stop);
+        assert_eq!(hook.handler_type, HookHandlerType::Command);
+        assert_eq!(hook.execution_mode, HookExecutionMode::Sync);
         assert_eq!(hook.hook_source, HookSource::Project);
         assert_eq!(hook.status, HookRunStatus::Blocked);
     }
@@ -1075,22 +1046,25 @@ mod tests {
     #[tokio::test]
     async fn hook_run_analytics_payload_falls_back_to_turn_context_id() {
         let (_session, turn_context) = make_session_and_context().await;
-        let completed = HookCompletedEvent {
-            turn_id: None,
-            run: sample_hook_run(HookRunStatus::Failed, HookSource::Unknown),
-        };
+        let mut run = sample_hook_run(HookRunStatus::Failed, HookSource::Unknown);
+        run.handler_type = HookHandlerType::Prompt;
+        run.execution_mode = HookExecutionMode::Async;
+        let completed = HookCompletedEvent { turn_id: None, run };
 
         let (tracking, hook) =
             hook_run_analytics_payload("thread-123".to_string(), &turn_context, &completed);
 
         assert_eq!(tracking.turn_id, turn_context.sub_id);
+        assert_eq!(hook.handler_type, HookHandlerType::Prompt);
+        assert_eq!(hook.execution_mode, HookExecutionMode::Async);
         assert_eq!(hook.hook_source, HookSource::Unknown);
         assert_eq!(hook.status, HookRunStatus::Failed);
     }
 
     #[test]
     fn hook_run_metric_tags_match_analytics_shape() {
-        let run = sample_hook_run(HookRunStatus::Blocked, HookSource::Project);
+        let mut run = sample_hook_run(HookRunStatus::Blocked, HookSource::Project);
+        run.handler_type = HookHandlerType::McpTool;
 
         assert_eq!(
             hook_run_metric_tags(&run),
@@ -1098,6 +1072,8 @@ mod tests {
                 ("hook_name", "Stop"),
                 ("source", "project"),
                 ("status", "blocked"),
+                ("handler_type", "mcp_tool"),
+                ("execution_mode", "sync"),
             ]
         );
 
@@ -1110,13 +1086,16 @@ mod tests {
                 ("hook_name", "Stop"),
                 ("source", "cloud_requirements"),
                 ("status", "blocked"),
+                ("handler_type", "command"),
+                ("execution_mode", "sync"),
             ]
         );
     }
 
     #[test]
     fn hook_run_metric_tags_include_expanded_hook_sources() {
-        let run = sample_hook_run(HookRunStatus::Completed, HookSource::LegacyManagedConfigMdm);
+        let mut run = sample_hook_run(HookRunStatus::Completed, HookSource::LegacyManagedConfigMdm);
+        run.execution_mode = HookExecutionMode::Async;
 
         assert_eq!(
             hook_run_metric_tags(&run),
@@ -1124,6 +1103,8 @@ mod tests {
                 ("hook_name", "Stop"),
                 ("source", "legacy_managed_config_mdm"),
                 ("status", "completed"),
+                ("handler_type", "command"),
+                ("execution_mode", "async"),
             ]
         );
     }

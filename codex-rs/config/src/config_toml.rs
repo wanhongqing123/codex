@@ -2,9 +2,12 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::num::NonZeroU64;
 use std::path::Path;
 
 use crate::HooksToml;
+use crate::browser_use::BrowserUseConfigToml;
+use crate::computer_use::ComputerUseConfigToml;
 use crate::permissions_toml::PermissionsToml;
 use crate::profile_toml::ConfigProfile;
 use crate::types::AnalyticsConfigToml;
@@ -29,6 +32,7 @@ use crate::types::UriBasedFileOpener;
 use crate::types::WindowsToml;
 use codex_features::FeaturesToml;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
+use codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_PROVIDER_ID;
 use codex_model_provider_info::LEGACY_OLLAMA_CHAT_PROVIDER_ID;
 use codex_model_provider_info::LMSTUDIO_OSS_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
@@ -45,7 +49,6 @@ use codex_protocol::config_types::Verbosity;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::config_types::WebSearchToolConfig;
 use codex_protocol::config_types::WindowsSandboxLevel;
-use codex_protocol::models::BaseInstructionsProvenance;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::permissions::NetworkSandboxPolicy;
@@ -59,8 +62,9 @@ use serde::Serialize;
 use serde::de::Error as SerdeError;
 use serde_json::Value as JsonValue;
 
-const RESERVED_MODEL_PROVIDER_IDS: [&str; 4] = [
+const RESERVED_MODEL_PROVIDER_IDS: [&str; 5] = [
     AMAZON_BEDROCK_PROVIDER_ID,
+    AMAZON_BEDROCK_RUNTIME_PROVIDER_ID,
     OPENAI_PROVIDER_ID,
     OLLAMA_OSS_PROVIDER_ID,
     LMSTUDIO_OSS_PROVIDER_ID,
@@ -168,6 +172,7 @@ pub struct ConfigToml {
     pub model_auto_compact_token_limit_scope: Option<AutoCompactTokenLimitScope>,
 
     /// Default approval policy for executing commands.
+    #[schemars(with = "Option<crate::schema::ConfigAskForApproval>")]
     pub approval_policy: Option<AskForApproval>,
 
     /// Configures who approval requests are routed to for review once they have
@@ -178,6 +183,10 @@ pub struct ConfigToml {
     /// Optional policy instructions for the guardian auto-reviewer.
     #[serde(default)]
     pub auto_review: Option<AutoReviewToml>,
+
+    pub browser_use: Option<BrowserUseConfigToml>,
+
+    pub computer_use: Option<ComputerUseConfigToml>,
 
     #[serde(default)]
     pub shell_environment_policy: ShellEnvironmentPolicyToml,
@@ -326,9 +335,6 @@ pub struct ConfigToml {
     /// Defaults to `$CODEX_HOME/log`.
     pub log_dir: Option<AbsolutePathBuf>,
 
-    /// Debugging and reproducibility settings.
-    pub debug: Option<DebugToml>,
-
     /// Optional URI-based file opener. If set, citations to files in the model
     /// output will be hyperlinked using the specified URI scheme.
     pub file_opener: Option<UriBasedFileOpener>,
@@ -367,6 +373,9 @@ pub struct ConfigToml {
 
     /// Optional product SKU forwarded on host-owned Codex Apps MCP requests.
     pub apps_mcp_product_sku: Option<String>,
+
+    /// Bounded, product-owned metadata attached to every Responses API request.
+    pub responses_api_metadata: Option<BTreeMap<String, String>>,
 
     /// Orchestrator-owned feature settings.
     pub orchestrator: Option<OrchestratorToml>,
@@ -407,10 +416,6 @@ pub struct ConfigToml {
     /// active.
     pub experimental_realtime_start_instructions: Option<String>,
 
-    /// Experimental / do not use. When set, app-server fetches thread-scoped
-    /// config from a remote service at this endpoint.
-    pub experimental_thread_config_endpoint: Option<String>,
-
     /// Removed. Former remote thread-store endpoint setting kept only so we can
     /// fail fast instead of silently falling back to local persistence.
     #[schemars(skip)]
@@ -431,6 +436,9 @@ pub struct ConfigToml {
 
     /// Agent-related settings (thread limits, etc.).
     pub agents: Option<AgentsToml>,
+
+    /// Goal-related settings.
+    pub goals: Option<GoalsToml>,
 
     /// Memories subsystem settings.
     pub memories: Option<MemoriesToml>,
@@ -509,42 +517,6 @@ pub struct ConfigToml {
     pub experimental_use_unified_exec_tool: Option<bool>,
     /// Preferred OSS provider for local models, e.g. "lmstudio" or "ollama".
     pub oss_provider: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema)]
-#[schemars(deny_unknown_fields)]
-pub struct ConfigLockfileToml {
-    pub version: u32,
-    pub codex_version: String,
-
-    /// Origin of the effective base instructions captured in the lockfile.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base_instructions_provenance: Option<BaseInstructionsProvenance>,
-
-    /// Replayable effective config captured in the lockfile.
-    pub config: ConfigToml,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
-#[schemars(deny_unknown_fields)]
-pub struct DebugToml {
-    pub config_lockfile: Option<DebugConfigLockToml>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
-#[schemars(deny_unknown_fields)]
-pub struct DebugConfigLockToml {
-    /// Directory where Codex writes effective session config lock files.
-    pub export_dir: Option<AbsolutePathBuf>,
-
-    /// Lockfile to replay as the authoritative effective config.
-    pub load_path: Option<AbsolutePathBuf>,
-
-    /// Allow replaying a lock generated by a different Codex version.
-    pub allow_codex_version_mismatch: Option<bool>,
-
-    /// Save fields resolved from the model catalog/session configuration.
-    pub save_fields_resolved_from_model_catalog: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
@@ -681,6 +653,13 @@ where
         }
         Some(WebSearchToolConfigInput::Config(config)) => Some(config),
     })
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct GoalsToml {
+    /// Maximum token budget allowed for a goal and default budget for new goals.
+    pub max_goal_token_budget: Option<NonZeroU64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
@@ -909,8 +888,10 @@ pub fn validate_reserved_model_provider_ids(
     let mut conflicts = model_providers
         .keys()
         .filter(|key| {
-            key.as_str() != AMAZON_BEDROCK_PROVIDER_ID
-                && RESERVED_MODEL_PROVIDER_IDS.contains(&key.as_str())
+            !matches!(
+                key.as_str(),
+                AMAZON_BEDROCK_PROVIDER_ID | AMAZON_BEDROCK_RUNTIME_PROVIDER_ID
+            ) && RESERVED_MODEL_PROVIDER_IDS.contains(&key.as_str())
         })
         .map(|key| format!("`{key}`"))
         .collect::<Vec<_>>();
@@ -931,10 +912,14 @@ pub fn validate_model_providers(
 ) -> Result<(), String> {
     validate_reserved_model_provider_ids(model_providers)?;
     for (key, provider) in model_providers {
-        if key != AMAZON_BEDROCK_PROVIDER_ID {
+        if !matches!(
+            key.as_str(),
+            AMAZON_BEDROCK_PROVIDER_ID | AMAZON_BEDROCK_RUNTIME_PROVIDER_ID
+        ) {
             if provider.aws.is_some() {
                 return Err(format!(
-                    "model_providers.{key}: provider aws is only supported for `{AMAZON_BEDROCK_PROVIDER_ID}`"
+                    "model_providers.{key}: provider aws is only supported for \
+`{AMAZON_BEDROCK_PROVIDER_ID}` or `{AMAZON_BEDROCK_RUNTIME_PROVIDER_ID}`"
                 ));
             }
             if provider.name.trim().is_empty() {
@@ -960,6 +945,10 @@ where
     validate_model_providers(&model_providers).map_err(serde::de::Error::custom)?;
     Ok(model_providers)
 }
+
+#[cfg(test)]
+#[path = "bedrock_runtime_tests.rs"]
+mod bedrock_runtime_tests;
 
 pub fn validate_oss_provider(provider: &str) -> std::io::Result<()> {
     match provider {

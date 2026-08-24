@@ -1,25 +1,33 @@
 use anyhow::Result;
 use codex_core::StartThreadOptions;
 use codex_core::ThreadConfigSnapshot;
+use codex_core::TurnInputRequest;
 use codex_core::config::AgentRoleConfig;
+use codex_core::config::CurrentTimeReminderConfig;
 use codex_features::Feature;
+use codex_history::RolloutItem;
 use codex_models_manager::bundled_models_response;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::openai_models::MultiAgentMessages;
+use codex_protocol::openai_models::MultiAgentRoleMessages;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::MULTI_AGENT_MODE_OPEN_TAG;
 use codex_protocol::protocol::Op;
-use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::user_input::UserInput;
 use core_test_support::hooks::trust_discovered_hooks;
 use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::assert_parent_turn;
+use core_test_support::responses::assert_root_turn;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call_with_namespace;
@@ -75,6 +83,14 @@ const ROLE_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::High;
 const SUBAGENT_START_CONTEXT: &str = "subagent start context reaches child";
 const SUBAGENT_STOP_CONTINUATION: &str = "continue only the child";
 const INTERNAL_SUBAGENT_PROMPT: &str = "internal subagent: review";
+const FULL_HISTORY_MULTI_AGENT_MODE_HINT: &str = "Delegate independent work to another agent.";
+const FULL_HISTORY_SUBAGENT_DEVELOPER_INSTRUCTIONS: &str =
+    "Child-only developer instructions preserve their classification.";
+const FULL_HISTORY_SHARED_USAGE_HINT: &str = "Shared delegation guidance.";
+const FULL_HISTORY_PROACTIVE_PROMPT: &str = "switch to proactive delegation";
+const FULL_HISTORY_EXPLICIT_PROMPT: &str = "restore explicit-only delegation";
+const FULL_HISTORY_PROACTIVE_POLICY: &str = "Proactive multi-agent delegation is active.";
+const FULL_HISTORY_EXPLICIT_POLICY: &str = "Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask";
 
 fn body_contains(req: &wiremock::Request, text: &str) -> bool {
     decoded_body(req)
@@ -115,12 +131,6 @@ fn log_field<'a>(line: &'a str, name: &str) -> Option<&'a str> {
     line.split_ascii_whitespace()
         .find_map(|field| field.strip_prefix(&prefix))
         .map(|value| value.trim_matches('"'))
-}
-
-fn has_subagent_notification(req: &ResponsesRequest) -> bool {
-    req.message_input_texts("user")
-        .iter()
-        .any(|text| text.contains("<subagent_notification>"))
 }
 
 fn tool_parameter_description(tool: &Value, parameter_name: &str) -> Option<String> {
@@ -811,23 +821,20 @@ async fn subagent_stop_replaces_stop_and_skips_internal_subagents() -> Result<()
         turn_permission_fields(PermissionProfile::Disabled, test.cwd_path());
     internal_thread
         .thread
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
                 text: INTERNAL_SUBAGENT_PROMPT.to_string(),
                 text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
+            }])
+            .with_thread_settings(ThreadSettingsOverrides {
                 environments: Some(local_selections(test.config.cwd.clone())),
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,
                 model: Some(internal_thread.session_configured.model.clone()),
                 ..Default::default()
-            },
-        })
+            }),
+        )
         .await?;
     let turn_id = wait_for_event_match(internal_thread.thread.as_ref(), |event| match event {
         EventMsg::TurnStarted(event) => Some(event.turn_id.clone()),
@@ -873,7 +880,11 @@ async fn subagent_notification_is_included_without_wait() -> Result<()> {
     test.submit_turn(TURN_2_NO_WAIT_PROMPT).await?;
 
     let turn2_requests = wait_for_requests(&turn2).await?;
-    assert!(turn2_requests.iter().any(has_subagent_notification));
+    assert!(
+        turn2_requests
+            .iter()
+            .any(|request| request.has_content_kinds(&["multi_agent.subagent_notification"]))
+    );
 
     Ok(())
 }
@@ -966,11 +977,19 @@ async fn spawned_child_receives_forked_parent_context(
     let child_request = wait_for_request_with_model(&child_request_log, REQUESTED_MODEL).await?;
     assert!(child_request.body_contains_text(TURN_0_FORK_PROMPT));
     let child_body = child_request.body_json();
+    let child_metadata: serde_json::Value = serde_json::from_str(
+        child_body["client_metadata"]["x-codex-turn-metadata"]
+            .as_str()
+            .expect("child turn metadata"),
+    )?;
+    assert_eq!(child_metadata["thread_source"], "subagent");
     let original_parent_turn_id = parent_body["client_metadata"]["turn_id"]
         .as_str()
         .expect("legacy spawn parent turn id");
     assert_parent_turn(&parent_body, /*expected*/ None)?;
     assert_parent_turn(&child_body, Some(original_parent_turn_id))?;
+    assert_root_turn(&parent_body, Some(original_parent_turn_id))?;
+    assert_root_turn(&child_body, Some(original_parent_turn_id))?;
     assert_eq!(
         (
             child_body["model"].clone(),
@@ -1034,6 +1053,8 @@ async fn spawned_child_receives_forked_parent_context(
     assert_eq!(metadata["thread_id"], json!(child_thread_id));
     assert_parent_turn(&followup_parent_body, /*expected*/ None)?;
     assert_parent_turn(&reused_child_body, Some(followup_parent_turn_id))?;
+    assert_root_turn(&followup_parent_body, Some(followup_parent_turn_id))?;
+    assert_root_turn(&reused_child_body, Some(followup_parent_turn_id))?;
     Ok(())
 }
 
@@ -1042,11 +1063,17 @@ enum FullHistoryV2ModelSelection {
     ConfiguredDefault,
     ExplicitOverride,
     WorldStateIdentity,
+    CurrentTimeReminders,
+    MultiAgentModeInstructions,
+    MultiAgentModeTransitions,
 }
 
 #[test_case(FullHistoryV2ModelSelection::ConfiguredDefault; "configured default with omitted fork_turns")]
 #[test_case(FullHistoryV2ModelSelection::ExplicitOverride; "explicit override with fork_turns all")]
 #[test_case(FullHistoryV2ModelSelection::WorldStateIdentity; "world state appends context window when agent identity changes")]
+#[test_case(FullHistoryV2ModelSelection::CurrentTimeReminders; "full fork drops inherited current-time reminders")]
+#[test_case(FullHistoryV2ModelSelection::MultiAgentModeInstructions; "full fork drops inherited multi-agent mode instructions")]
+#[test_case(FullHistoryV2ModelSelection::MultiAgentModeTransitions; "full fork restores explicit policy after proactive transition")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_context(
     selection: FullHistoryV2ModelSelection,
@@ -1066,7 +1093,10 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
     .await;
     let (spawn_args, expected_model, expected_reasoning_effort) = match selection {
         FullHistoryV2ModelSelection::ConfiguredDefault
-        | FullHistoryV2ModelSelection::WorldStateIdentity => (
+        | FullHistoryV2ModelSelection::WorldStateIdentity
+        | FullHistoryV2ModelSelection::CurrentTimeReminders
+        | FullHistoryV2ModelSelection::MultiAgentModeInstructions
+        | FullHistoryV2ModelSelection::MultiAgentModeTransitions => (
             json!({
                 "message": CHILD_PROMPT,
                 "task_name": "worker",
@@ -1087,6 +1117,35 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
         ),
     };
     let spawn_args = serde_json::to_string(&spawn_args)?;
+    let mode_transition_turns = if matches!(
+        selection,
+        FullHistoryV2ModelSelection::MultiAgentModeTransitions
+    ) {
+        Some((
+            mount_sse_once_match(
+                &server,
+                |req: &wiremock::Request| body_contains(req, FULL_HISTORY_PROACTIVE_PROMPT),
+                sse(vec![
+                    ev_response_created("resp-proactive-1"),
+                    ev_assistant_message("msg-proactive-1", "proactive done"),
+                    ev_completed("resp-proactive-1"),
+                ]),
+            )
+            .await,
+            mount_sse_once_match(
+                &server,
+                |req: &wiremock::Request| body_contains(req, FULL_HISTORY_EXPLICIT_PROMPT),
+                sse(vec![
+                    ev_response_created("resp-explicit-1"),
+                    ev_assistant_message("msg-explicit-1", "explicit done"),
+                    ev_completed("resp-explicit-1"),
+                ]),
+            )
+            .await,
+        ))
+    } else {
+        None
+    };
     let spawn_turn = mount_sse_once_match(
         &server,
         |req: &wiremock::Request| body_contains(req, TURN_1_PROMPT),
@@ -1133,12 +1192,75 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
             .features
             .enable(Feature::MultiAgentV2)
             .expect("test config should allow feature update");
+        let model_catalog = config.model_catalog.get_or_insert_with(|| {
+            bundled_models_response().expect("bundled models.json should parse")
+        });
+        for model in [INHERITED_MODEL, V2_DEFAULT_MODEL, V2_REQUESTED_MODEL] {
+            let model_info = model_catalog
+                .models
+                .iter_mut()
+                .find(|model_info| model_info.slug == model)
+                .unwrap_or_else(|| panic!("{model} should exist in bundled models.json"));
+            let multi_agent = model_info
+                .model_messages
+                .as_mut()
+                .expect("bundled model should include model messages")
+                .multi_agent
+                .get_or_insert_with(MultiAgentMessages::default);
+            multi_agent.role = Some(MultiAgentRoleMessages {
+                root: Some(format!("{model} root role.")),
+                subagent: Some(format!("{model} subagent role.")),
+            });
+            if matches!(
+                selection,
+                FullHistoryV2ModelSelection::MultiAgentModeTransitions
+            ) && model == INHERITED_MODEL
+            {
+                model_info
+                    .supported_reasoning_levels
+                    .push(ReasoningEffortPreset {
+                        effort: ReasoningEffort::Ultra,
+                        description: "Ultra".to_string(),
+                    });
+            }
+        }
         if matches!(selection, FullHistoryV2ModelSelection::WorldStateIdentity) {
             config
                 .features
                 .enable(Feature::TokenBudget)
                 .expect("test config should allow feature update");
             config.model_context_window = Some(128_000);
+        }
+        if matches!(selection, FullHistoryV2ModelSelection::ConfiguredDefault) {
+            config.developer_instructions = None;
+            config.multi_agent_v2.subagent_developer_instructions =
+                Some(FULL_HISTORY_SUBAGENT_DEVELOPER_INSTRUCTIONS.to_string());
+        }
+        if matches!(selection, FullHistoryV2ModelSelection::CurrentTimeReminders) {
+            config
+                .features
+                .enable(Feature::CurrentTimeReminder)
+                .expect("test config should allow feature update");
+            config.current_time_reminder = Some(CurrentTimeReminderConfig {
+                reminder_interval_seconds: 0,
+                ..CurrentTimeReminderConfig::default()
+            });
+        }
+        if matches!(
+            selection,
+            FullHistoryV2ModelSelection::MultiAgentModeInstructions
+        ) {
+            config.multi_agent_v2.multi_agent_mode_hint_text =
+                Some(FULL_HISTORY_MULTI_AGENT_MODE_HINT.to_string());
+        }
+        if matches!(
+            selection,
+            FullHistoryV2ModelSelection::MultiAgentModeTransitions
+        ) {
+            config.multi_agent_v2.root_agent_usage_hint_text =
+                Some(FULL_HISTORY_SHARED_USAGE_HINT.to_string());
+            config.multi_agent_v2.subagent_usage_hint_text =
+                Some(FULL_HISTORY_SHARED_USAGE_HINT.to_string());
         }
         config.model = Some(INHERITED_MODEL.to_string());
         config.model_reasoning_effort = Some(INHERITED_REASONING_EFFORT);
@@ -1159,11 +1281,159 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
 
     test.submit_turn(TURN_0_FORK_PROMPT).await?;
     let _ = seed_turn.single_request();
+    if let Some((proactive_turn, explicit_turn)) = mode_transition_turns {
+        for (prompt, effort, approval_policy) in [
+            (
+                FULL_HISTORY_PROACTIVE_PROMPT,
+                ReasoningEffort::Ultra,
+                Some(AskForApproval::OnRequest),
+            ),
+            (FULL_HISTORY_EXPLICIT_PROMPT, ReasoningEffort::High, None),
+        ] {
+            test.codex
+                .start_or_steer_turn(
+                    TurnInputRequest::user_input(vec![UserInput::Text {
+                        text: prompt.to_string(),
+                        text_elements: Vec::new(),
+                    }])
+                    .with_thread_settings(ThreadSettingsOverrides {
+                        effort: Some(Some(effort)),
+                        approval_policy,
+                        ..Default::default()
+                    }),
+                )
+                .await?;
+            wait_for_event(&test.codex, |event| {
+                matches!(event, EventMsg::TurnComplete(_))
+            })
+            .await;
+        }
+        let proactive_request = proactive_turn.single_request();
+        let proactive_developer_messages = proactive_request.message_input_text_groups("developer");
+        assert!(
+            proactive_developer_messages.iter().any(|message| {
+                message.len() > 1
+                    && message
+                        .iter()
+                        .any(|text| text.contains(FULL_HISTORY_PROACTIVE_POLICY))
+            }),
+            "proactive policy should share a developer message with unrelated context: {proactive_developer_messages:?}"
+        );
+        let explicit_request = explicit_turn.single_request();
+        assert!(
+            explicit_request
+                .message_input_texts("developer")
+                .iter()
+                .any(|text| text.contains(FULL_HISTORY_EXPLICIT_POLICY)),
+            "restored parent policy should require an explicit delegation request"
+        );
+    }
     test.submit_turn(TURN_1_PROMPT).await?;
-    let _ = spawn_turn.single_request();
+    let parent_request = spawn_turn.single_request();
 
     let child_request = wait_for_request_with_model(&child_request_log, expected_model).await?;
     assert!(child_request.body_contains_text(TURN_0_FORK_PROMPT));
+    let misaligned_child_messages = child_request
+        .inputs_of_type("message")
+        .into_iter()
+        .filter(|message| {
+            message["internal_chat_message_metadata_passthrough"]["content_item_kinds"]
+                .as_array()
+                .is_some_and(|kinds| {
+                    message["content"]
+                        .as_array()
+                        .is_none_or(|content| content.len() != kinds.len())
+                })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(misaligned_child_messages, Vec::<Value>::new());
+    let child_developer_messages = child_request.message_input_texts("developer");
+    if matches!(selection, FullHistoryV2ModelSelection::ConfiguredDefault) {
+        assert_eq!(
+            (
+                parent_request.body_contains_text(FULL_HISTORY_SUBAGENT_DEVELOPER_INSTRUCTIONS),
+                child_request.has_content_kinds(&["generic.developer_instructions"]),
+                child_developer_messages
+                    .iter()
+                    .filter(|text| text.as_str() == FULL_HISTORY_SUBAGENT_DEVELOPER_INSTRUCTIONS)
+                    .count(),
+            ),
+            (false, true, 1)
+        );
+    }
+    if !matches!(
+        selection,
+        FullHistoryV2ModelSelection::MultiAgentModeTransitions
+    ) {
+        assert!(child_request.has_content_kinds(&["multi_agent.role_instructions"]));
+        assert_eq!(
+            child_developer_messages
+                .iter()
+                .filter(|message| message.contains(&format!("{expected_model} subagent role.")))
+                .count(),
+            1
+        );
+    }
+    assert!(!child_developer_messages.iter().any(|message| {
+        message.contains(&format!("{INHERITED_MODEL} root role."))
+            || message.contains(&format!("{INHERITED_MODEL} subagent role."))
+    }));
+    if matches!(
+        selection,
+        FullHistoryV2ModelSelection::MultiAgentModeInstructions
+    ) {
+        let mode_instruction_count = |request: &ResponsesRequest| {
+            request
+                .message_input_texts("developer")
+                .into_iter()
+                .filter(|text| text.starts_with(MULTI_AGENT_MODE_OPEN_TAG))
+                .count()
+        };
+        assert_eq!(
+            (
+                mode_instruction_count(&parent_request),
+                mode_instruction_count(&child_request),
+            ),
+            (1, 1)
+        );
+    }
+    if matches!(
+        selection,
+        FullHistoryV2ModelSelection::MultiAgentModeTransitions
+    ) {
+        assert_eq!(
+            (
+                child_developer_messages
+                    .iter()
+                    .filter(|message| message.starts_with(MULTI_AGENT_MODE_OPEN_TAG))
+                    .count(),
+                child_developer_messages
+                    .iter()
+                    .filter(|message| message.contains(FULL_HISTORY_EXPLICIT_POLICY))
+                    .count(),
+                child_developer_messages
+                    .iter()
+                    .filter(|message| message.contains(FULL_HISTORY_PROACTIVE_POLICY))
+                    .count(),
+                child_developer_messages
+                    .iter()
+                    .filter(|message| message.contains(FULL_HISTORY_SHARED_USAGE_HINT))
+                    .count(),
+            ),
+            (1, 1, 0, 1)
+        );
+    }
+    if matches!(selection, FullHistoryV2ModelSelection::CurrentTimeReminders) {
+        let reminder_count = |request: &ResponsesRequest| {
+            request
+                .message_input_texts("developer")
+                .into_iter()
+                .filter(|text| text.starts_with("<current_time_reminder>"))
+                .count()
+        };
+        assert_eq!(reminder_count(&parent_request), 2);
+        assert_eq!(reminder_count(&child_request), 1);
+    }
     let child_body = child_request.body_json();
     if matches!(selection, FullHistoryV2ModelSelection::WorldStateIdentity) {
         let child_thread_id = ThreadId::from_string(

@@ -144,6 +144,7 @@ fn thread_sources_round_trip_as_scalar_labels() {
     for (source, label) in [
         (ThreadSource::User, "user"),
         (ThreadSource::Subagent, "subagent"),
+        (ThreadSource::GuardianReview, "guardian_review"),
         (
             ThreadSource::Feature("automation".to_string()),
             "automation",
@@ -255,8 +256,10 @@ fn thread_resume_response_round_trips_initial_turns_page() {
             section: Some(ThreadSection {
                 id: "01984de2-8f74-7c91-a3b2-5c5e937cf318".to_string(),
                 name: "Pinned".to_string(),
+                appearance: None,
             }),
             section_entered_at: Some(1),
+            project_id: None,
             history_mode: Default::default(),
             model_provider: "openai".to_string(),
             created_at: 1,
@@ -302,6 +305,7 @@ fn thread_resume_response_round_trips_initial_turns_page() {
         json!({
             "id": "01984de2-8f74-7c91-a3b2-5c5e937cf318",
             "name": "Pinned",
+            "appearance": null,
         })
     );
     assert_eq!(value["thread"]["sectionEnteredAt"], json!(1));
@@ -312,10 +316,12 @@ fn thread_resume_response_round_trips_initial_turns_page() {
         .expect("serialized thread should be an object");
     legacy_thread_fields.remove("section");
     legacy_thread_fields.remove("sectionEnteredAt");
+    legacy_thread_fields.remove("projectId");
     let legacy_thread =
         serde_json::from_value::<Thread>(legacy_thread).expect("deserialize legacy thread");
     assert_eq!(legacy_thread.section, None);
     assert_eq!(legacy_thread.section_entered_at, None);
+    assert_eq!(legacy_thread.project_id, None);
 
     assert_eq!(
         value.get("initialTurnsPage"),
@@ -496,6 +502,13 @@ fn thread_list_params_accepts_section_id_filter() {
 
 #[test]
 fn thread_section_list_params_and_response_round_trip() {
+    let legacy = serde_json::from_value::<ThreadSection>(json!({
+        "id": "legacy",
+        "name": "Legacy",
+    }))
+    .expect("legacy sections without appearance should deserialize");
+    assert_eq!(legacy.appearance, None);
+
     let params = serde_json::from_value::<ThreadSectionListParams>(json!({
         "cursor": "section-cursor",
         "limit": 25,
@@ -513,6 +526,7 @@ fn thread_section_list_params_and_response_round_trip() {
         data: vec![ThreadSection {
             id: "01984de2-8f74-7c91-a3b2-5c5e937cf318".to_string(),
             name: "Pinned".to_string(),
+            appearance: None,
         }],
         next_cursor: None,
     };
@@ -523,6 +537,7 @@ fn thread_section_list_params_and_response_round_trip() {
             "data": [{
                 "id": "01984de2-8f74-7c91-a3b2-5c5e937cf318",
                 "name": "Pinned",
+                "appearance": null,
             }],
             "nextCursor": null,
         })
@@ -532,6 +547,21 @@ fn thread_section_list_params_and_response_round_trip() {
             .expect("section list should deserialize"),
         response
     );
+}
+
+#[test]
+fn thread_section_updates_distinguish_omitted_and_cleared_appearance() {
+    for (value, appearance) in [
+        (json!({ "sectionId": "section", "name": "Work" }), None),
+        (
+            json!({ "sectionId": "section", "name": "Work", "appearance": null }),
+            Some(None),
+        ),
+    ] {
+        let params = serde_json::from_value::<ThreadSectionUpdateParams>(value)
+            .expect("section update should deserialize");
+        assert_eq!(params.appearance, appearance);
+    }
 }
 
 #[test]
@@ -809,6 +839,52 @@ fn additional_file_system_permissions_preserves_canonical_entries() {
         CoreFileSystemPermissions::try_from(permissions)
             .expect("API paths should convert to native paths"),
         core_permissions
+    );
+
+    for path in [r"C:\workspace\read-only", r"\\server\share\read-only"] {
+        let path = LegacyAppPathString::from_string(path);
+        let core_permissions = CoreFileSystemPermissions::from_read_write_path_uris(
+            Some(vec![
+                PathUri::try_from(path.clone()).expect("valid foreign permission path"),
+            ]),
+            /*write*/ None,
+        );
+        let permissions = AdditionalFileSystemPermissions::from(core_permissions.clone());
+        assert_eq!(permissions.read, Some(vec![path]));
+        assert_eq!(permissions.entries.as_ref().map(Vec::len), Some(1));
+        assert_eq!(
+            CoreFileSystemPermissions::try_from(permissions)
+                .expect("foreign API paths should round-trip"),
+            core_permissions
+        );
+    }
+    #[cfg(windows)]
+    for path in ["//server/share/read-only", r"/\server/share/read-only"] {
+        let path = LegacyAppPathString::from_string(path);
+        let core_permissions =
+            CoreFileSystemPermissions::try_from(AdditionalFileSystemPermissions {
+                read: Some(vec![path.clone()]),
+                write: None,
+                glob_scan_max_depth: None,
+                entries: None,
+            })
+            .expect("native slash UNC permission path");
+        let permissions = AdditionalFileSystemPermissions::from(core_permissions);
+        assert_eq!(
+            permissions.read,
+            Some(vec![LegacyAppPathString::from_string(
+                r"\\server\share\read-only"
+            )])
+        );
+    }
+    assert!(
+        CoreFileSystemPermissions::try_from(AdditionalFileSystemPermissions {
+            read: Some(vec![LegacyAppPathString::from_string(r"\\localhost\share")]),
+            write: None,
+            glob_scan_max_depth: None,
+            entries: None,
+        })
+        .is_ok()
     );
 }
 
@@ -1921,6 +1997,8 @@ fn config_granular_approval_policy_is_marked_experimental() {
         service_tier: None,
         analytics: None,
         apps: None,
+        browser_use: None,
+        computer_use: None,
         desktop: None,
         additional: HashMap::new(),
     });
@@ -1954,6 +2032,8 @@ fn config_approvals_reviewer_is_marked_experimental() {
         service_tier: None,
         analytics: None,
         apps: None,
+        browser_use: None,
+        computer_use: None,
         desktop: None,
         additional: HashMap::new(),
     });
@@ -1965,6 +2045,9 @@ fn config_approvals_reviewer_is_marked_experimental() {
 fn config_requirements_granular_allowed_approval_policy_is_marked_experimental() {
     let reason =
         crate::experimental_api::ExperimentalApi::experimental_reason(&ConfigRequirements {
+            cli_auth_credentials_store: None,
+            chatgpt_base_url: None,
+            additional_developer_instructions: None,
             allowed_approval_policies: Some(vec![AskForApproval::Granular {
                 sandbox_approval: true,
                 rules: true,
@@ -1979,10 +2062,12 @@ fn config_requirements_granular_allowed_approval_policy_is_marked_experimental()
             default_permissions: None,
             allowed_web_search_modes: None,
             allow_managed_hooks_only: None,
+            allow_browser_and_computer_use: None,
             allow_appshots: None,
             allow_remote_control: None,
             computer_use: None,
             browser_use: None,
+            in_app_browser: None,
             feature_requirements: None,
             hooks: None,
             enforce_residency: None,
@@ -2422,6 +2507,8 @@ fn mcp_server_status_serializes_absent_server_info_as_null() {
     let response = ListMcpServerStatusResponse {
         data: vec![McpServerStatus {
             name: "not-ready".to_string(),
+            runtime_status: None,
+            plugin_id: None,
             server_info: None,
             tools: HashMap::new(),
             resources: Vec::new(),
@@ -2436,6 +2523,8 @@ fn mcp_server_status_serializes_absent_server_info_as_null() {
         json!({
             "data": [{
                 "name": "not-ready",
+                "runtimeStatus": null,
+                "pluginId": null,
                 "serverInfo": null,
                 "tools": {},
                 "resources": [],
@@ -2444,6 +2533,33 @@ fn mcp_server_status_serializes_absent_server_info_as_null() {
             }],
             "nextCursor": null,
         })
+    );
+}
+
+#[test]
+fn mcp_server_status_accepts_older_inventory_without_runtime_status() {
+    let status: McpServerStatus = serde_json::from_value(json!({
+        "name": "older-server",
+        "pluginId": null,
+        "serverInfo": null,
+        "tools": {},
+        "resources": [],
+        "resourceTemplates": [],
+        "authStatus": "unknown",
+    }))
+    .expect("older app-server inventory should deserialize");
+    assert_eq!(
+        status,
+        McpServerStatus {
+            name: "older-server".to_string(),
+            runtime_status: None,
+            plugin_id: None,
+            server_info: None,
+            tools: HashMap::new(),
+            resources: Vec::new(),
+            resource_templates: Vec::new(),
+            auth_status: McpAuthStatus::Unknown,
+        }
     );
 }
 
@@ -2507,6 +2623,8 @@ fn mcp_server_status_serializes_absent_server_info_metadata_as_null() {
     let response = ListMcpServerStatusResponse {
         data: vec![McpServerStatus {
             name: "initialized".to_string(),
+            runtime_status: None,
+            plugin_id: Some("lookup@test".to_string()),
             server_info: Some(McpServerInfo {
                 name: "lookup-server".to_string(),
                 title: None,
@@ -2528,6 +2646,8 @@ fn mcp_server_status_serializes_absent_server_info_metadata_as_null() {
         json!({
             "data": [{
                 "name": "initialized",
+                "runtimeStatus": null,
+                "pluginId": "lookup@test",
                 "serverInfo": {
                     "name": "lookup-server",
                     "title": null,
@@ -2861,6 +2981,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
         ],
         phase: None,
         memory_citation: None,
+        delivery: None,
     });
 
     assert_eq!(
@@ -2870,6 +2991,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
             text: "Hello world".to_string(),
             phase: None,
             memory_citation: None,
+            delivery: None,
         }
     );
 
@@ -2888,6 +3010,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
             }],
             rollout_ids: vec!["rollout-1".to_string()],
         }),
+        delivery: None,
     });
 
     assert_eq!(
@@ -2905,6 +3028,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
                 }],
                 thread_ids: vec!["rollout-1".to_string()],
             }),
+            delivery: None,
         }
     );
 
@@ -3363,6 +3487,45 @@ fn user_input_into_core_preserves_media_fields() {
         CoreUserInput::LocalAudio {
             path: PathBuf::from("local/audio.mp3"),
         }
+    );
+}
+
+#[test]
+fn hook_handler_metadata_only_exposes_async_for_commands() {
+    assert_eq!(
+        serde_json::to_value(HookHandlerMetadata::Command {
+            command: "echo hello".to_string(),
+            r#async: true,
+        })
+        .unwrap(),
+        json!({
+            "handlerType": "command",
+            "command": "echo hello",
+            "async": true,
+        }),
+    );
+    assert_eq!(
+        serde_json::from_value::<HookHandlerMetadata>(json!({
+            "handlerType": "command",
+            "command": "echo hello",
+        }))
+        .unwrap(),
+        HookHandlerMetadata::Command {
+            command: "echo hello".to_string(),
+            r#async: false,
+        },
+    );
+    assert_eq!(
+        serde_json::to_value(HookHandlerMetadata::McpTool {
+            server: "security".to_string(),
+            tool: "scan".to_string(),
+        })
+        .unwrap(),
+        json!({
+            "handlerType": "mcpTool",
+            "server": "security",
+            "tool": "scan",
+        }),
     );
 }
 

@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::num::NonZeroUsize;
 
 use codex_protocol::protocol::SkillScope;
 use codex_utils_string::approx_token_count;
@@ -14,6 +15,7 @@ use crate::fragments::AvailableSkillsInstructions;
 use crate::host_aliases::shared_host_alias_roots;
 
 const DEFAULT_SKILL_METADATA_CHAR_BUDGET: usize = 8_000;
+const MAX_CONFIGURED_SKILL_METADATA_TOKEN_BUDGET: usize = 10_000;
 const MAX_SKILL_PROMPT_BYTES: usize = 8_000;
 const SKILL_METADATA_CONTEXT_WINDOW_PERCENT: usize = 2;
 const MAX_CATALOG_SKILL_DESCRIPTION_CHARS: usize = 1_024;
@@ -122,7 +124,18 @@ impl SkillRenderReport {
     }
 }
 
-pub(crate) fn skill_metadata_budget(context_window: Option<i64>) -> SkillMetadataBudget {
+pub(crate) fn skill_metadata_budget(
+    context_window: Option<i64>,
+    max_context_tokens: Option<NonZeroUsize>,
+) -> SkillMetadataBudget {
+    if let Some(max_context_tokens) = max_context_tokens {
+        return SkillMetadataBudget::Tokens(
+            max_context_tokens
+                .get()
+                .min(MAX_CONFIGURED_SKILL_METADATA_TOKEN_BUDGET),
+        );
+    }
+
     context_window
         .and_then(|window| usize::try_from(window).ok())
         .filter(|window| *window > 0)
@@ -182,10 +195,8 @@ struct SkillLine<'a> {
 impl<'a> SkillLine<'a> {
     fn new(entry: &'a SkillCatalogEntry, policy: SkillCatalogRenderPolicy) -> Self {
         let locator = match &entry.authority.kind {
-            SkillSourceKind::Orchestrator => entry.id.0.as_str(),
-            SkillSourceKind::Host | SkillSourceKind::Executor | SkillSourceKind::Custom(_) => {
-                entry.rendered_path()
-            }
+            SkillSourceKind::Executor | SkillSourceKind::Orchestrator => entry.id.0.as_str(),
+            SkillSourceKind::Host | SkillSourceKind::Custom(_) => entry.rendered_path(),
         };
         Self::with_locator(entry, policy, locator.to_string())
     }
@@ -202,7 +213,7 @@ impl<'a> SkillLine<'a> {
             locator,
             locator_kind: match &entry.authority.kind {
                 SkillSourceKind::Host => "file",
-                SkillSourceKind::Executor => "environment resource",
+                SkillSourceKind::Executor => "executor package",
                 SkillSourceKind::Orchestrator => "orchestrator package",
                 SkillSourceKind::Custom(_) => "custom resource",
             },
@@ -1048,7 +1059,7 @@ fn build_aliased_catalog(
     ))
 }
 
-fn build_alias_plan(entries: &[&SkillCatalogEntry]) -> Option<AliasPlan> {
+pub(crate) fn build_alias_plan(entries: &[&SkillCatalogEntry]) -> Option<AliasPlan> {
     let source = &entries.first()?.authority.kind;
     if entries.iter().any(|entry| &entry.authority.kind != source) {
         return None;
@@ -1078,17 +1089,13 @@ fn build_alias_plan(entries: &[&SkillCatalogEntry]) -> Option<AliasPlan> {
 
 fn render_skill_locator_with_aliases(entry: &SkillCatalogEntry, plan: &AliasPlan) -> String {
     let locator = match &entry.authority.kind {
-        SkillSourceKind::Orchestrator => entry.id.0.as_str(),
-        SkillSourceKind::Host | SkillSourceKind::Executor | SkillSourceKind::Custom(_) => {
-            entry.rendered_path()
-        }
+        SkillSourceKind::Executor | SkillSourceKind::Orchestrator => entry.id.0.as_str(),
+        SkillSourceKind::Host | SkillSourceKind::Custom(_) => entry.rendered_path(),
     };
     if entry.alias_root().is_none() {
         return locator.to_string();
     }
-    let normalized_locator = locator.replace('\\', "/");
-    plan.shorten(&normalized_locator)
-        .unwrap_or_else(|| locator.to_string())
+    plan.shorten(locator).unwrap_or_else(|| locator.to_string())
 }
 
 fn aliased_metadata_overhead_cost(
