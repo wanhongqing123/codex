@@ -156,10 +156,7 @@ impl ChatWidget {
         &mut self,
         user_message: UserMessage,
     ) -> Option<AppCommand> {
-        let reply_id = crate::multi_ai_code_im_bridge::remote_im_reply_id(&user_message.text);
-        let task_id = crate::multi_ai_code_im_bridge::remote_im_task_id(&user_message.text);
-        let source_routed = reply_id.is_some();
-        self.set_remote_im_input_origin(source_routed);
+        self.set_remote_im_input_origin(false);
         let committed_echo = user_message_display_for_history(
             user_message.clone(),
             &UserMessageHistoryRecord::UserMessageText,
@@ -169,7 +166,7 @@ impl ChatWidget {
             UserMessageHistoryRecord::UserMessageText,
             ShellEscapePolicy::Disallow,
         );
-        self.remember_remote_im_reply(accepted, reply_id, task_id, source_routed, committed_echo);
+        self.remember_remote_im_reply(accepted, None, None, false, committed_echo);
         command
     }
 
@@ -186,8 +183,6 @@ impl ChatWidget {
         if text.trim().is_empty() {
             return Err("IM message is empty".to_string());
         }
-        let reply_id =
-            reply_id.or_else(|| crate::multi_ai_code_im_bridge::remote_im_reply_id(&text));
         let display_text = if display_text.trim().is_empty() {
             text.clone()
         } else {

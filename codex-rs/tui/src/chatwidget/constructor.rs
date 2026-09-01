@@ -159,7 +159,6 @@ impl ChatWidget {
             add_credits_nudge_email_in_flight: None,
             adaptive_chunking: AdaptiveChunkingPolicy::default(),
             stream_controller: None,
-            remote_im_reply_display: Default::default(),
             remote_im_pending_user_message_echoes: VecDeque::new(),
             remote_im_pending_replies: VecDeque::new(),
             remote_im_forwarding_active: false,

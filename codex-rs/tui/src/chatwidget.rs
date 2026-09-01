@@ -634,7 +634,6 @@ pub(crate) struct ChatWidget {
     adaptive_chunking: AdaptiveChunkingPolicy,
     // Stream lifecycle controller
     stream_controller: Option<StreamController>,
-    remote_im_reply_display: crate::multi_ai_code_im_bridge::RemoteImReplyDisplayFilter,
     remote_im_pending_user_message_echoes: VecDeque<UserMessageDisplay>,
     remote_im_pending_replies: VecDeque<PendingRemoteImReply>,
     remote_im_forwarding_active: bool,

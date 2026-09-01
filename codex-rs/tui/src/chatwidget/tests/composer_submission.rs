@@ -377,7 +377,7 @@ async fn parent_owned_thread_preserves_queued_input_before_draining() {
 #[tokio::test]
 async fn remote_im_submission_keeps_model_prompt_out_of_tui_preview() {
     let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    let model_text = "[来自远程 IM：phone]\n你好\n\n[IM_REPLY] internal protocol";
+    let model_text = "[来自远程 IM：phone]\n你好\n\n[INTERNAL] structured route";
     let display_text = "[来自远程 IM：phone]\n你好";
 
     assert_eq!(
@@ -579,11 +579,7 @@ async fn remote_im_submission_does_not_render_committed_model_prompt_echo() {
     drain_insert_history(&mut rx);
 
     let display_text = "[来自远程 IM：phone]\n你好";
-    let model_text = concat!(
-        "[来自远程 IM：phone]\n你好\n\n",
-        "[IM_REPLY] internal protocol\n",
-        "Opening marker: <remote-im-reply id=\"rim-0123456789abcdef\">"
-    );
+    let model_text = "[来自远程 IM：phone]\n你好\n\n使用结构化回复通道";
     assert_eq!(
         chat.submit_user_message_from_remote_im(
             model_text.to_string(),
