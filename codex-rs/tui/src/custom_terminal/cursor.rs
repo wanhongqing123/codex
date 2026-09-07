@@ -26,6 +26,19 @@ where
         &mut self,
         cursor_style: SetCursorStyle,
     ) -> io::Result<()> {
+        // Multi-AI Code 定制：这个 JediTerm 修复默认关闭。
+        //
+        // 它每帧都做一次「隐藏光标 → ESC[H 跳左上角 → 显示光标 → 设样式 → 跳回」的往返。
+        // 上游把它包在 DEC 2026（同步输出）里，支持该模式的终端不会看到中间状态。
+        // 但宿主 Multi-AI Code 用 xterm.js 5.5.0 渲染，**它完全没有实现 2026**
+        // （整个 bundle 里 "2026" 出现 0 次），于是每个中间状态都会被真实画出来——
+        // 光标每帧闪到左上角再回来，表现为「光标乱窜」。
+        //
+        // 我们不是 JediTerm，所以默认走原来的 set_cursor_style。
+        // 真在 JetBrains 终端里跑 codex 的人可以设 CODEX_JEDITERM_CURSOR_REPAIR=1 打开。
+        if std::env::var_os("CODEX_JEDITERM_CURSOR_REPAIR").is_none() {
+            return self.set_cursor_style(cursor_style);
+        }
         // JediTerm before 3.56 prints DECSCUSR's space intermediate at the cursor.
         // Apply the style over an owned glyph, then repair it even on unchanged frames.
         // https://github.com/JetBrains/jediterm/commit/0c4524f2978bddae65a46c35f264bf89e2ed58fd
