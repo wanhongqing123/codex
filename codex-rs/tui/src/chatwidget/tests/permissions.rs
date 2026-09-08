@@ -459,6 +459,205 @@ async fn startup_prompts_for_windows_sandbox_when_agent_requested() {
     );
 }
 
+/// A distribution may ship `codex.exe` without `codex-windows-sandbox-setup.exe`.
+/// Choosing "Set up default sandbox" then dies in `CreateProcess` and the user sees
+/// the OS dialog "Windows cannot find 'codex-windows-sandbox-setup.exe'". Withhold
+/// the option instead — and keep the unelevated one, which needs no helper.
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn windows_sandbox_prompt_withholds_admin_setup_when_helper_is_not_bundled() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let _guard = crate::windows_sandbox::test_support::set_elevated_setup_available(false);
+
+    chat.set_feature_enabled(Feature::WindowsSandbox, /*enabled*/ false);
+    chat.set_feature_enabled(Feature::WindowsSandboxElevated, /*enabled*/ false);
+
+    chat.maybe_prompt_windows_sandbox_enable(/*show_now*/ true);
+
+    let popup = render_bottom_popup(&chat, /*width*/ 120);
+    assert!(
+        !popup.contains("Set up default sandbox"),
+        "admin setup must not be offered when its helper is absent: {popup}"
+    );
+    assert!(
+        popup.contains("does not include"),
+        "expected the prompt to say why admin setup is unavailable: {popup}"
+    );
+    assert!(
+        popup.contains("Use non-admin sandbox"),
+        "the unelevated path needs no helper and must still be offered: {popup}"
+    );
+}
+
+/// The user's actual goal: not wanting a sandbox must not be a dead end. When
+/// policy leaves the choice open, the prompt has to offer a way to continue
+/// without one - selecting it writes no config and changes no approval policy.
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn windows_sandbox_prompt_offers_continuing_without_a_sandbox() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let _guard = crate::windows_sandbox::test_support::set_elevated_setup_available(false);
+
+    chat.set_feature_enabled(Feature::WindowsSandbox, /*enabled*/ false);
+    chat.set_feature_enabled(Feature::WindowsSandboxElevated, /*enabled*/ false);
+    let approval_before = chat.config.permissions.approval_policy.clone();
+
+    chat.maybe_prompt_windows_sandbox_enable(/*show_now*/ true);
+
+    let popup = render_bottom_popup(&chat, /*width*/ 120);
+    assert!(
+        popup.contains("Continue without a sandbox"),
+        "declining must be offered when policy allows it: {popup}"
+    );
+    assert_eq!(
+        chat.config.permissions.approval_policy, approval_before,
+        "offering the opt-out must not touch the approval policy"
+    );
+}
+
+/// Selecting "Continue without a sandbox" must actually let the session proceed:
+/// the prompt closes, no setup is kicked off, and neither the approval policy nor
+/// the sandbox mode is rewritten behind the user's back. Asserting only that the
+/// entry renders would not show any of that.
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn choosing_to_continue_without_a_sandbox_closes_the_prompt_and_changes_nothing() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let _guard = crate::windows_sandbox::test_support::set_elevated_setup_available(false);
+
+    chat.set_feature_enabled(Feature::WindowsSandbox, /*enabled*/ false);
+    chat.set_feature_enabled(Feature::WindowsSandboxElevated, /*enabled*/ false);
+    let approval_before = chat.config.permissions.approval_policy.clone();
+    let mode_before = chat.config.permissions.windows_sandbox_mode;
+
+    chat.maybe_prompt_windows_sandbox_enable(/*show_now*/ true);
+    assert!(chat.has_active_view(), "the prompt should be open");
+
+    // Items with the helper absent: non-admin sandbox, continue without, quit.
+    let popup = render_bottom_popup(&chat, /*width*/ 120);
+    assert!(
+        popup.contains("Continue without a sandbox"),
+        "the opt-out must be present to select: {popup}"
+    );
+    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert!(
+        chat.bottom_pane.no_modal_or_popup_active(),
+        "choosing to continue must close the prompt: {}",
+        render_bottom_popup(&chat, /*width*/ 120)
+    );
+    let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            AppEvent::BeginWindowsSandboxElevatedSetup { .. }
+                | AppEvent::BeginWindowsSandboxLegacySetup { .. }
+        )),
+        "declining must not start any sandbox setup: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AppEvent::Exit(_))),
+        "declining must not quit the session: {events:?}"
+    );
+    assert_eq!(
+        chat.config.permissions.approval_policy, approval_before,
+        "the approval policy must be untouched"
+    );
+    assert_eq!(
+        chat.config.permissions.windows_sandbox_mode, mode_before,
+        "the sandbox mode must be untouched"
+    );
+}
+
+/// The opt-out only dismisses; it does not turn a configured sandbox off. Offering
+/// it while a mode is set would promise something it does not do, so it is limited
+/// to sessions where the sandbox is already disabled.
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn continue_without_a_sandbox_is_hidden_when_a_mode_is_already_configured() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let _guard = crate::windows_sandbox::test_support::set_elevated_setup_available(false);
+
+    chat.set_feature_enabled(Feature::WindowsSandbox, /*enabled*/ false);
+    chat.set_feature_enabled(Feature::WindowsSandboxElevated, /*enabled*/ false);
+    // Chosen by the user, not pinned by policy - so the requirement still permits
+    // `None`, and only the current level keeps the opt-out hidden.
+    chat.set_windows_sandbox_mode(Some(WindowsSandboxModeToml::Unelevated));
+
+    let preset = builtin_approval_presets()
+        .into_iter()
+        .find(|preset| preset.id == "auto")
+        .expect("auto preset");
+    chat.open_windows_sandbox_enable_prompt(preset, /*profile_selection*/ None);
+
+    let popup = render_bottom_popup(&chat, /*width*/ 120);
+    assert!(
+        !popup.contains("Continue without a sandbox"),
+        "a configured sandbox must not appear dismissable: {popup}"
+    );
+}
+
+/// With the helper absent *and* policy forbidding every alternative there is
+/// nothing to offer, so the optional nudge must not open a dead-end prompt.
+/// Asserting "no admin option" alone would pass even if a popup were shown, so
+/// this asserts no overlay is active at all.
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn windows_sandbox_prompt_stays_closed_when_no_mode_can_be_set_up() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let _guard = crate::windows_sandbox::test_support::set_elevated_setup_available(false);
+
+    chat.set_feature_enabled(Feature::WindowsSandbox, /*enabled*/ false);
+    chat.set_feature_enabled(Feature::WindowsSandboxElevated, /*enabled*/ false);
+    // Only elevated is permitted, and this build cannot provision it. The level
+    // stays Disabled, so this is the optional nudge rather than a required setup.
+    chat.config.config_layer_stack =
+        windows_sandbox_requirements_stack(vec![WindowsSandboxModeToml::Elevated]);
+
+    chat.maybe_prompt_windows_sandbox_enable(/*show_now*/ true);
+
+    assert!(
+        chat.bottom_pane.no_modal_or_popup_active(),
+        "no mode is provisionable, so no popup may be shown: {}",
+        render_bottom_popup(&chat, /*width*/ 120)
+    );
+}
+
+/// Policy pins elevated but this build cannot provision it. The failure must be
+/// stated, and must not quietly degrade into "run without a sandbox": neither the
+/// unelevated fallback nor the opt-out may appear, leaving only an explicit exit.
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn required_elevated_sandbox_reports_missing_helper_without_downgrading() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let _guard = crate::windows_sandbox::test_support::set_elevated_setup_available(false);
+
+    chat.set_feature_enabled(Feature::WindowsSandbox, /*enabled*/ false);
+    chat.set_feature_enabled(Feature::WindowsSandboxElevated, /*enabled*/ false);
+    chat.config.config_layer_stack =
+        windows_sandbox_requirements_stack(vec![WindowsSandboxModeToml::Elevated]);
+    chat.set_windows_sandbox_mode(Some(WindowsSandboxModeToml::Elevated));
+
+    chat.maybe_prompt_windows_sandbox_enable(/*show_now*/ true);
+
+    let popup = render_bottom_popup(&chat, /*width*/ 120);
+    assert!(
+        popup.contains("does not include"),
+        "the missing helper must be stated, not silently ignored: {popup}"
+    );
+    assert!(
+        !popup.contains("Continue without a sandbox"),
+        "a required sandbox must not be dismissable: {popup}"
+    );
+    assert!(
+        !popup.contains("Use non-admin sandbox"),
+        "policy pins elevated, so unelevated must not be offered as a downgrade: {popup}"
+    );
+}
+
 #[cfg(target_os = "windows")]
 #[tokio::test]
 async fn startup_windows_sandbox_prompt_blocks_disallowed_unelevated_fallback() {

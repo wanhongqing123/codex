@@ -265,6 +265,8 @@ pub use setup::ONLINE_USERNAME;
 #[cfg(target_os = "windows")]
 pub use setup::SETUP_VERSION;
 #[cfg(target_os = "windows")]
+pub use setup::elevated_setup_helper_is_bundled;
+#[cfg(target_os = "windows")]
 pub use setup::SandboxSetupRequest;
 #[cfg(target_os = "windows")]
 pub use setup::SetupRootOverrides;

@@ -25,6 +25,11 @@ pub enum SetupErrorCode {
     OrchestratorPayloadSerializeFailed,
     /// Failed to launch the setup helper process (spawn or ShellExecuteExW).
     OrchestratorHelperLaunchFailed,
+    /// The setup helper is not present in this installation, so elevated
+    /// provisioning cannot run at all. Distinct from a launch failure: there is
+    /// nothing to launch, and asking the OS to find it by bare filename is what
+    /// produces the "Windows cannot find 'codex-windows-sandbox-setup.exe'" dialog.
+    OrchestratorHelperNotBundled,
     /// User canceled the UAC prompt while launching the helper.
     OrchestratorHelperLaunchCanceled,
     /// Helper exited non-zero and no structured report was available.
@@ -82,6 +87,7 @@ impl SetupErrorCode {
             Self::OrchestratorElevationRequired => "orchestrator_elevation_required",
             Self::OrchestratorPayloadSerializeFailed => "orchestrator_payload_serialize_failed",
             Self::OrchestratorHelperLaunchFailed => "orchestrator_helper_launch_failed",
+            Self::OrchestratorHelperNotBundled => "orchestrator_helper_not_bundled",
             Self::OrchestratorHelperLaunchCanceled => "orchestrator_helper_launch_canceled",
             Self::OrchestratorHelperExitNonzero => "orchestrator_helper_exit_nonzero",
             Self::OrchestratorHelperReportReadFailed => "orchestrator_helper_report_read_failed",

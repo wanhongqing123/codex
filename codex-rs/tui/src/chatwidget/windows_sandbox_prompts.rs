@@ -13,6 +13,22 @@ impl ChatWidget {
             .is_ok()
     }
 
+    /// Whether policy permits running with no Windows sandbox at all.
+    ///
+    /// The requirement is an `Option`, so "no sandbox" is `None` rather than a
+    /// mode value — there is no `disabled` variant to ask about. This gates the
+    /// opt-out entry in the enable prompt: when an administrator has pinned a
+    /// mode, declining is not the user's to choose.
+    #[cfg(any(target_os = "windows", test))]
+    pub(crate) fn windows_sandbox_may_stay_disabled(&self) -> bool {
+        self.config
+            .config_layer_stack
+            .requirements()
+            .windows_sandbox_mode
+            .can_set(&None)
+            .is_ok()
+    }
+
     #[cfg(any(target_os = "windows", test))]
     pub(super) fn elevated_windows_sandbox_setup_required(&self) -> bool {
         crate::windows_sandbox::level_from_config(&self.config) == WindowsSandboxLevel::Elevated
@@ -257,25 +273,43 @@ impl ChatWidget {
         let legacy_preset = preset.clone();
         let legacy_profile_selection = profile_selection.clone();
         let quit_otel = self.session_telemetry.clone();
+        let decline_otel = self.session_telemetry.clone();
         let retry_preset = preset.clone();
         let retry_profile_selection = profile_selection.clone();
-        let mut items = vec![SelectionItem {
-            name: "Set up default sandbox (requires Administrator permissions)".to_string(),
-            description: None,
-            actions: vec![Box::new(move |tx| {
-                accept_otel.counter(
-                    "codex.windows_sandbox.elevated_prompt_accept",
-                    /*inc*/ 1,
-                    &[],
-                );
-                tx.send(AppEvent::BeginWindowsSandboxElevatedSetup {
-                    preset: preset.clone(),
-                    profile_selection: profile_selection.clone(),
-                });
-            })],
-            dismiss_on_select: true,
-            ..Default::default()
-        }];
+        // Elevated provisioning shells out to `codex-windows-sandbox-setup.exe`. A build
+        // that does not ship that helper cannot perform it, and offering the choice
+        // anyway ends in an OS "cannot find file" dialog *after* the user commits to it.
+        // Withhold the option instead, and say so when it was the required one.
+        let elevated_is_available = crate::windows_sandbox::elevated_setup_is_available();
+        if !elevated_is_available {
+            header.push(*Box::new(
+                Paragraph::new(vec![line![
+                    "The admin sandbox is unavailable: this Codex installation does not include \
+                     the setup helper it requires."
+                ]])
+                .wrap(Wrap { trim: false }),
+            ));
+        }
+        let mut items: Vec<SelectionItem> = Vec::new();
+        if elevated_is_available {
+            items.push(SelectionItem {
+                name: "Set up default sandbox (requires Administrator permissions)".to_string(),
+                description: None,
+                actions: vec![Box::new(move |tx| {
+                    accept_otel.counter(
+                        "codex.windows_sandbox.elevated_prompt_accept",
+                        /*inc*/ 1,
+                        &[],
+                    );
+                    tx.send(AppEvent::BeginWindowsSandboxElevatedSetup {
+                        preset: preset.clone(),
+                        profile_selection: profile_selection.clone(),
+                    });
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            });
+        }
         if allow_unelevated {
             items.push(SelectionItem {
                 name: "Use non-admin sandbox (higher risk if prompt injected)".to_string(),
@@ -293,6 +327,33 @@ impl ChatWidget {
                 })],
                 dismiss_on_select: true,
                 require_explicit_confirmation: true,
+                ..Default::default()
+            });
+        }
+        // Without this, declining leaves only "Quit" — the prompt would be a
+        // dead end for anyone who does not want a sandbox. Selecting it just
+        // closes the prompt: no config is written and the approval policy is
+        // untouched, so the session continues exactly as configured. Gated on
+        // policy, so a pinned mode cannot be dismissed away.
+        // Restricted to the case where the sandbox is already off. Selecting this
+        // only dismisses the prompt - it does not change the mode - so offering it
+        // while a mode is configured would describe an outcome it cannot deliver.
+        if crate::windows_sandbox::level_from_config(&self.config) == WindowsSandboxLevel::Disabled
+            && self.windows_sandbox_may_stay_disabled()
+        {
+            items.push(SelectionItem {
+                name: "Continue without a sandbox".to_string(),
+                description: Some(
+                    "Codex runs unsandboxed; your approval settings still apply.".to_string(),
+                ),
+                actions: vec![Box::new(move |_tx| {
+                    decline_otel.counter(
+                        "codex.windows_sandbox.elevated_prompt_decline",
+                        /*inc*/ 1,
+                        &[],
+                    );
+                })],
+                dismiss_on_select: true,
                 ..Default::default()
             });
         }
@@ -464,7 +525,14 @@ impl ChatWidget {
     #[cfg(target_os = "windows")]
     pub(crate) fn maybe_prompt_windows_sandbox_enable(&mut self, show_now: bool) {
         let windows_sandbox_level = crate::windows_sandbox::level_from_config(&self.config);
-        let setup_is_required = windows_sandbox_level == WindowsSandboxLevel::Disabled
+        // Don't open the optional nudge when neither mode can actually be set up here:
+        // elevated needs a helper this build may not ship, and unelevated may be
+        // disallowed by policy. A *required* sandbox still prompts, so a missing helper
+        // is reported rather than silently dropped.
+        let can_offer_any_mode = self.windows_sandbox_mode_allowed(WindowsSandboxModeToml::Unelevated)
+            || crate::windows_sandbox::elevated_setup_is_available();
+        let setup_is_required = (windows_sandbox_level == WindowsSandboxLevel::Disabled
+            && can_offer_any_mode)
             || self.elevated_windows_sandbox_setup_required();
         if show_now
             && setup_is_required

@@ -55,6 +55,63 @@ pub(crate) fn level_from_config(config: &Config) -> WindowsSandboxLevel {
 #[cfg(target_os = "windows")]
 pub(crate) use codex_windows_sandbox::sandbox_setup_is_complete;
 
+/// Whether this installation can actually provision the elevated Windows sandbox.
+///
+/// Only the elevated path is covered: it is the one that shells out to
+/// `codex-windows-sandbox-setup.exe`. A distribution may omit that helper, and
+/// offering to "create a sandbox" that cannot be created is worse than not
+/// offering it — the launch surfaces as an OS-level "file not found" dialog
+/// rather than anything Codex can explain. This says nothing about the
+/// unelevated path, which provisions in-process and needs no helper.
+///
+/// Under `cfg(test)` this reads a thread-local instead of the filesystem: the
+/// real probe keys off `current_exe()`, which during tests is the test harness,
+/// so it would otherwise report "unavailable" purely because of where the test
+/// binary lives.
+pub(crate) fn elevated_setup_is_available() -> bool {
+    #[cfg(test)]
+    {
+        test_support::elevated_setup_available()
+    }
+    #[cfg(all(not(test), target_os = "windows"))]
+    {
+        codex_windows_sandbox::elevated_setup_helper_is_bundled()
+    }
+    #[cfg(all(not(test), not(target_os = "windows")))]
+    {
+        false
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Defaults to `true` so existing tests describe a normal install that
+        /// carries the helper; flip it to cover a distribution that omits it.
+        static ELEVATED_SETUP_AVAILABLE: Cell<bool> = const { Cell::new(true) };
+    }
+
+    pub(crate) fn elevated_setup_available() -> bool {
+        ELEVATED_SETUP_AVAILABLE.with(Cell::get)
+    }
+
+    /// Restores the default when dropped so one test cannot leak into the next.
+    pub(crate) struct ElevatedSetupAvailabilityGuard;
+
+    impl Drop for ElevatedSetupAvailabilityGuard {
+        fn drop(&mut self) {
+            ELEVATED_SETUP_AVAILABLE.with(|cell| cell.set(true));
+        }
+    }
+
+    pub(crate) fn set_elevated_setup_available(value: bool) -> ElevatedSetupAvailabilityGuard {
+        ELEVATED_SETUP_AVAILABLE.with(|cell| cell.set(value));
+        ElevatedSetupAvailabilityGuard
+    }
+}
+
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn sandbox_setup_is_complete(_codex_home: &Path) -> bool {
     false

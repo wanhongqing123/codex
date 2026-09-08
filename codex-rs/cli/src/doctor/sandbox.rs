@@ -266,6 +266,10 @@ pub(super) fn sandbox_check(config: &Config, arg0_paths: &Arg0DispatchPaths) -> 
                         | SetupErrorCode::HelperFirewallRuleVerifyFailed => {
                             "ask IT to allow Codex sandbox rules in managed Windows Firewall policy"
                         }
+                        SetupErrorCode::OrchestratorHelperNotBundled => {
+                            "this build does not ship codex-windows-sandbox-setup.exe; install a \
+                             distribution that includes it, or use the non-admin sandbox"
+                        }
                         SetupErrorCode::OrchestratorPayloadSerializeFailed
                         | SetupErrorCode::HelperRequestArgsFailed
                         | SetupErrorCode::HelperUnknownError => {

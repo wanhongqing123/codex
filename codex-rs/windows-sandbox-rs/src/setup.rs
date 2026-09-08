@@ -357,7 +357,7 @@ fn run_setup_refresh_inner(
 }
 
 fn run_setup_refresh_payload(b64: &str, codex_home: &Path) -> Result<()> {
-    let exe = find_setup_exe();
+    let exe = find_setup_exe()?;
     let sbx_dir = sandbox_dir(codex_home);
     let log_path = current_log_file_path(&sbx_dir);
     let cleared_report = match clear_setup_error_report(codex_home) {
@@ -849,13 +849,39 @@ fn quote_arg(arg: &str) -> String {
     out
 }
 
-fn find_setup_exe() -> PathBuf {
+/// Whether this installation actually carries the elevated setup helper.
+///
+/// Callers use this to avoid offering elevated provisioning that cannot run.
+/// It says nothing about the unelevated (restricted-token) path, which uses a
+/// different helper — do not treat a `false` here as "no Windows sandbox at all".
+pub fn elevated_setup_helper_is_bundled() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| find_setup_exe_for_current_exe(&exe))
+        .is_some()
+}
+
+/// Resolve the setup helper, or fail loudly if this build does not ship it.
+///
+/// Previously this fell back to the bare filename, which made `CreateProcess`
+/// search `PATH` and, when the helper was absent, pop the Windows
+/// "cannot find 'codex-windows-sandbox-setup.exe'" dialog with no way to tell
+/// the user what was actually missing. Failing here keeps the diagnosis in
+/// Codex's own error channel; it deliberately does **not** downgrade the
+/// requested sandbox mode.
+fn find_setup_exe() -> Result<PathBuf> {
     if let Ok(exe) = std::env::current_exe()
         && let Some(setup_exe) = find_setup_exe_for_current_exe(&exe)
     {
-        return setup_exe;
+        return Ok(setup_exe);
     }
-    PathBuf::from(SETUP_EXE_FILENAME)
+    Err(failure(
+        SetupErrorCode::OrchestratorHelperNotBundled,
+        format!(
+            "{SETUP_EXE_FILENAME} is not present in this Codex installation, so the elevated \
+             Windows sandbox cannot be provisioned"
+        ),
+    ))
 }
 
 fn find_setup_exe_for_current_exe(exe: &Path) -> Option<PathBuf> {
@@ -921,7 +947,7 @@ fn run_setup_exe_payload(
     use windows_sys::Win32::UI::Shell::SEE_MASK_NOCLOSEPROCESS;
     use windows_sys::Win32::UI::Shell::SHELLEXECUTEINFOW;
     use windows_sys::Win32::UI::Shell::ShellExecuteExW;
-    let exe = find_setup_exe();
+    let exe = find_setup_exe()?;
     let cleared_report = match clear_setup_error_report(codex_home) {
         Ok(()) => true,
         Err(err) => {
@@ -1354,6 +1380,8 @@ mod tests {
     use super::WINDOWS_PLATFORM_DEFAULT_READ_ROOTS;
     use super::WINDOWS_SANDBOX_PROXY_PORTS_ENV_KEY;
     use super::build_payload_roots;
+    use super::SETUP_EXE_FILENAME;
+    use super::find_setup_exe;
     use super::find_setup_exe_for_current_exe;
     use super::gather_full_read_roots_for_permissions;
     use super::gather_read_roots;
@@ -1753,6 +1781,45 @@ mod tests {
         let resolved = find_setup_exe_for_current_exe(&exe).expect("setup exe");
 
         assert_eq!(resolved, setup_exe);
+    }
+
+    /// A distribution may ship `codex.exe` without the setup helper. Resolution used
+    /// to fall back to the bare filename, so `CreateProcess` searched `PATH` and the
+    /// user got the OS dialog "Windows cannot find
+    /// 'codex-windows-sandbox-setup.exe'" with nothing explaining what was missing.
+    ///
+    /// This asserts the **outer** resolver, which is the part that changed. Asserting
+    /// only that `find_setup_exe_for_current_exe` returns `None` would pass against
+    /// the old bare-filename fallback too, so it could not catch this regression.
+    #[test]
+    fn find_setup_exe_fails_as_not_bundled_instead_of_yielding_a_launchable_path() {
+        // No helper sits beside the test binary — the same shape as a distribution
+        // that omits it.
+        let error = find_setup_exe().expect_err("a missing helper must not resolve to a path");
+
+        let failure = extract_failure(&error).expect("a structured setup failure");
+        assert_eq!(failure.code, SetupErrorCode::OrchestratorHelperNotBundled);
+        assert!(
+            failure.message.contains(SETUP_EXE_FILENAME),
+            "the failure should name the missing helper: {}",
+            failure.message
+        );
+    }
+
+    /// Guards the half that must not change: a present helper still resolves, so the
+    /// new error path cannot break a working installation.
+    #[test]
+    fn setup_exe_lookup_still_resolves_a_bundled_helper() {
+        let tmp = TempDir::new().expect("tempdir");
+        let bin_dir = tmp.path().join("package").join(BIN_DIRNAME);
+        fs::create_dir_all(&bin_dir).expect("create bin dir");
+        let exe = bin_dir.join("codex.exe");
+        fs::write(&exe, b"codex").expect("write exe");
+        assert_eq!(find_setup_exe_for_current_exe(&exe), None);
+
+        let setup_exe = bin_dir.join(SETUP_EXE_FILENAME);
+        fs::write(&setup_exe, b"setup").expect("write setup");
+        assert_eq!(find_setup_exe_for_current_exe(&exe), Some(setup_exe));
     }
 
     #[test]
