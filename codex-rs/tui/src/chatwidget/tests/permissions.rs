@@ -1650,3 +1650,48 @@ fn the_suppression_env_var_name_is_the_one_hosts_set() {
         "CODEX_SUPPRESS_OPTIONAL_WINDOWS_SANDBOX_PROMPT"
     );
 }
+
+/// The trust screen offers to "continue and create a sandbox". That copy keys
+/// off the same `level == Disabled` as the offer itself, so suppressing the
+/// offer alone would leave onboarding promising a sandbox that is never created
+/// and never even asked about - a promise the session cannot keep.
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn suppression_also_withdraws_the_onboarding_promise_to_create_a_sandbox() {
+    let (chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    assert!(
+        crate::windows_sandbox::trust_screen_may_promise_sandbox(&chat.config),
+        "an unsuppressed session does offer a sandbox, so the promise is honest"
+    );
+
+    let _suppressed =
+        crate::windows_sandbox::test_support::set_optional_prompt_suppressed(true);
+    assert!(
+        !crate::windows_sandbox::trust_screen_may_promise_sandbox(&chat.config),
+        "nothing will create a sandbox once suppressed, so the promise must go"
+    );
+}
+
+/// A configured sandbox is untouched by suppression: the promise stays absent
+/// for the ordinary reason (a mode is already set), not because of the switch.
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn a_configured_sandbox_mode_is_unaffected_by_suppression() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_windows_sandbox_mode(Some(WindowsSandboxModeToml::Unelevated));
+
+    let mode_before = chat.config.permissions.windows_sandbox_mode;
+    let _suppressed =
+        crate::windows_sandbox::test_support::set_optional_prompt_suppressed(true);
+
+    assert_eq!(
+        chat.config.permissions.windows_sandbox_mode, mode_before,
+        "suppression must not disturb a sandbox the user already configured"
+    );
+    assert_eq!(
+        crate::windows_sandbox::level_from_config(&chat.config),
+        WindowsSandboxLevel::RestrictedToken,
+        "the configured sandbox stays in force; only the offer is silenced"
+    );
+}

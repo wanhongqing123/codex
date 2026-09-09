@@ -111,6 +111,17 @@ pub(crate) fn optional_prompt_is_suppressed() -> bool {
     }
 }
 
+/// Whether the trust screen may say that continuing will create a sandbox.
+///
+/// The hint keys off the same `level == Disabled` that triggers the offer, so
+/// suppressing the offer without suppressing this would leave the onboarding
+/// screen promising a sandbox that is never created and never even asked about.
+/// Keeping both behind one predicate is what stops the copy and the behaviour
+/// drifting apart.
+pub(crate) fn trust_screen_may_promise_sandbox(config: &Config) -> bool {
+    level_from_config(config) == WindowsSandboxLevel::Disabled && !optional_prompt_is_suppressed()
+}
+
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::cell::Cell;

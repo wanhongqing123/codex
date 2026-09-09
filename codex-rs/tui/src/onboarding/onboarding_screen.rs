@@ -160,7 +160,7 @@ impl OnboardingScreen {
         }
         #[cfg(target_os = "windows")]
         let show_windows_create_sandbox_hint = remote_project_trust.is_none()
-            && crate::windows_sandbox::level_from_config(&config) == WindowsSandboxLevel::Disabled;
+            && crate::windows_sandbox::trust_screen_may_promise_sandbox(&config);
         #[cfg(not(target_os = "windows"))]
         let show_windows_create_sandbox_hint = false;
         let highlighted = TrustDirectorySelection::Trust;
