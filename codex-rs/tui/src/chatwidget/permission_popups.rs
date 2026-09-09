@@ -325,8 +325,12 @@ impl ChatWidget {
         if approvals_reviewer == ApprovalsReviewer::User && preset.id == "auto" {
             #[cfg(target_os = "windows")]
             {
+                // Suppressed hosts fall through to the ordinary preset path
+                // below, so picking "auto" still applies the preset — it just
+                // does not detour through the sandbox offer first.
                 if crate::windows_sandbox::level_from_config(&self.config)
                     == WindowsSandboxLevel::Disabled
+                    && !crate::windows_sandbox::optional_prompt_is_suppressed()
                 {
                     let preset = preset.clone();
                     if crate::windows_sandbox::sandbox_setup_is_complete(

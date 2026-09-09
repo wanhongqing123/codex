@@ -1513,3 +1513,140 @@ async fn permissions_full_access_history_cell_emitted_only_after_confirmation() 
         "expected full access update history message, got: {rendered}"
     );
 }
+
+/// A host that deliberately runs unsandboxed can stop the *offer*. The nudge
+/// fires on `trust_decision_was_made && level == Disabled`, and "off" is spelled
+/// by omitting the `[windows] sandbox` key, so without this the same question
+/// returns for every new directory - and the opt-out records nothing.
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn suppressed_host_does_not_offer_the_optional_windows_sandbox() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let _available = crate::windows_sandbox::test_support::set_elevated_setup_available(false);
+    let _suppressed =
+        crate::windows_sandbox::test_support::set_optional_prompt_suppressed(true);
+
+    chat.set_feature_enabled(Feature::WindowsSandbox, /*enabled*/ false);
+    chat.set_feature_enabled(Feature::WindowsSandboxElevated, /*enabled*/ false);
+    let approval_before = chat.config.permissions.approval_policy.clone();
+    let mode_before = chat.config.permissions.windows_sandbox_mode;
+
+    chat.maybe_prompt_windows_sandbox_enable(/*show_now*/ true);
+
+    assert!(
+        !chat.has_active_view(),
+        "a suppressed host must not be asked at all: {}",
+        render_bottom_popup(&chat, /*width*/ 120)
+    );
+    assert_eq!(
+        chat.config.permissions.approval_policy, approval_before,
+        "suppressing an offer must not touch the approval policy"
+    );
+    assert_eq!(
+        chat.config.permissions.windows_sandbox_mode, mode_before,
+        "suppressing an offer must not write a sandbox mode"
+    );
+}
+
+/// Paired control for the test above: the identical session prompts when the
+/// host has not asked for suppression, so the absence above is caused by the
+/// switch and not by the rest of the setup.
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn the_same_session_is_still_offered_a_sandbox_when_not_suppressed() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let _available = crate::windows_sandbox::test_support::set_elevated_setup_available(false);
+
+    chat.set_feature_enabled(Feature::WindowsSandbox, /*enabled*/ false);
+    chat.set_feature_enabled(Feature::WindowsSandboxElevated, /*enabled*/ false);
+
+    chat.maybe_prompt_windows_sandbox_enable(/*show_now*/ true);
+
+    assert!(chat.has_active_view(), "the unsuppressed session must still ask");
+}
+
+/// Suppression covers the *optional* nudge only. A sandbox that policy requires
+/// still prompts, because that prompt is how it gets provisioned - silencing it
+/// would turn a mandatory sandbox into a silently-skipped one.
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn suppression_does_not_silence_a_policy_required_sandbox() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let _available = crate::windows_sandbox::test_support::set_elevated_setup_available(false);
+    let _suppressed =
+        crate::windows_sandbox::test_support::set_optional_prompt_suppressed(true);
+
+    chat.set_feature_enabled(Feature::WindowsSandbox, /*enabled*/ false);
+    chat.set_feature_enabled(Feature::WindowsSandboxElevated, /*enabled*/ false);
+    chat.config.config_layer_stack =
+        windows_sandbox_requirements_stack(vec![WindowsSandboxModeToml::Elevated]);
+    chat.set_windows_sandbox_mode(Some(WindowsSandboxModeToml::Elevated));
+
+    chat.maybe_prompt_windows_sandbox_enable(/*show_now*/ true);
+
+    let popup = render_bottom_popup(&chat, /*width*/ 120);
+    assert!(
+        popup.contains("does not include"),
+        "a required sandbox must still report its missing helper: {popup}"
+    );
+    assert!(
+        !popup.contains("Continue without a sandbox"),
+        "suppression must not make a required sandbox dismissable: {popup}"
+    );
+}
+
+/// The startup nudge is not the only door: choosing the "auto" preset in the
+/// approvals popup also detours through the sandbox offer. Suppression must
+/// close that door too - and must leave the preset itself working, rather than
+/// turning the selection into a no-op.
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn suppressed_host_applies_the_auto_preset_without_the_sandbox_detour() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let _available = crate::windows_sandbox::test_support::set_elevated_setup_available(false);
+    let _suppressed =
+        crate::windows_sandbox::test_support::set_optional_prompt_suppressed(true);
+
+    chat.set_feature_enabled(Feature::WindowsSandbox, /*enabled*/ false);
+    chat.set_feature_enabled(Feature::WindowsSandboxElevated, /*enabled*/ false);
+    let preset = builtin_approval_presets()
+        .into_iter()
+        .find(|preset| preset.id == "auto")
+        .expect("auto preset");
+
+    let actions = chat.permission_mode_actions(
+        &preset,
+        "Agent".to_string(),
+        ApprovalsReviewer::User,
+        /*profile_selection*/ None,
+        /*return_to_permissions*/ false,
+    );
+    for action in &actions {
+        action(&chat.app_event_tx);
+    }
+
+    let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AppEvent::OpenWindowsSandboxEnablePrompt { .. })),
+        "a suppressed host must not be detoured into the sandbox offer: {events:?}"
+    );
+    assert!(
+        !actions.is_empty(),
+        "selecting the preset must still do something - suppression closes the \
+         detour, it does not disable the preset"
+    );
+}
+
+/// Tripwire for a cross-process contract: the embedding host sets this exact
+/// variable when it spawns Codex. Renaming the constant alone would silently
+/// stop the suppression from ever engaging in a real install, because nothing
+/// else compares the two spellings.
+#[test]
+fn the_suppression_env_var_name_is_the_one_hosts_set() {
+    assert_eq!(
+        crate::windows_sandbox::SUPPRESS_OPTIONAL_PROMPT_ENV,
+        "CODEX_SUPPRESS_OPTIONAL_WINDOWS_SANDBOX_PROMPT"
+    );
+}

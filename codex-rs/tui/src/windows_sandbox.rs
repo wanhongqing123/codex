@@ -83,6 +83,34 @@ pub(crate) fn elevated_setup_is_available() -> bool {
     }
 }
 
+/// Environment switch an embedder sets to stop *offering* the Windows sandbox.
+pub(crate) const SUPPRESS_OPTIONAL_PROMPT_ENV: &str =
+    "CODEX_SUPPRESS_OPTIONAL_WINDOWS_SANDBOX_PROMPT";
+
+/// Whether the host asked us to stop offering to turn the sandbox on.
+///
+/// This suppresses an *offer*, nothing else. It does not change the sandbox
+/// level, write any config, or relax an approval policy: a sandbox that policy
+/// *requires* still prompts, because that prompt is how a required sandbox gets
+/// provisioned. It exists because the optional nudge fires on
+/// `trust_decision_was_made && level == Disabled`, and "off" is spelled by
+/// omitting the `[windows] sandbox` key — so an embedder that deliberately runs
+/// without a sandbox is re-asked for every new directory it ever opens, with no
+/// way to record the answer.
+pub(crate) fn optional_prompt_is_suppressed() -> bool {
+    #[cfg(test)]
+    {
+        test_support::optional_prompt_suppressed()
+    }
+    #[cfg(not(test))]
+    {
+        matches!(
+            std::env::var(SUPPRESS_OPTIONAL_PROMPT_ENV).as_deref(),
+            Ok("1") | Ok("true")
+        )
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::cell::Cell;
@@ -91,6 +119,30 @@ pub(crate) mod test_support {
         /// Defaults to `true` so existing tests describe a normal install that
         /// carries the helper; flip it to cover a distribution that omits it.
         static ELEVATED_SETUP_AVAILABLE: Cell<bool> = const { Cell::new(true) };
+
+        /// Defaults to `false` so existing tests keep describing a standalone
+        /// Codex, which still offers the sandbox.
+        static OPTIONAL_PROMPT_SUPPRESSED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn optional_prompt_suppressed() -> bool {
+        OPTIONAL_PROMPT_SUPPRESSED.with(Cell::get)
+    }
+
+    /// Restores the default when dropped so one test cannot leak into the next.
+    pub(crate) struct OptionalPromptSuppressionGuard;
+
+    impl Drop for OptionalPromptSuppressionGuard {
+        fn drop(&mut self) {
+            OPTIONAL_PROMPT_SUPPRESSED.with(|cell| cell.set(false));
+        }
+    }
+
+    pub(crate) fn set_optional_prompt_suppressed(
+        value: bool,
+    ) -> OptionalPromptSuppressionGuard {
+        OPTIONAL_PROMPT_SUPPRESSED.with(|cell| cell.set(value));
+        OptionalPromptSuppressionGuard
     }
 
     pub(crate) fn elevated_setup_available() -> bool {

@@ -531,9 +531,14 @@ impl ChatWidget {
         // is reported rather than silently dropped.
         let can_offer_any_mode = self.windows_sandbox_mode_allowed(WindowsSandboxModeToml::Unelevated)
             || crate::windows_sandbox::elevated_setup_is_available();
-        let setup_is_required = (windows_sandbox_level == WindowsSandboxLevel::Disabled
-            && can_offer_any_mode)
-            || self.elevated_windows_sandbox_setup_required();
+        // A host that deliberately runs unsandboxed can silence the optional
+        // nudge. Only the optional half is gated: a policy-*required* sandbox
+        // still prompts below, because that prompt is how it gets provisioned.
+        let offer_optional_setup = windows_sandbox_level == WindowsSandboxLevel::Disabled
+            && can_offer_any_mode
+            && !crate::windows_sandbox::optional_prompt_is_suppressed();
+        let setup_is_required =
+            offer_optional_setup || self.elevated_windows_sandbox_setup_required();
         if show_now
             && setup_is_required
             && let Some(preset) = builtin_approval_presets()
