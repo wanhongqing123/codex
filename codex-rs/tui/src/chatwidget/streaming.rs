@@ -329,7 +329,16 @@ impl ChatWidget {
                 AgentMessageContent::Text { text } => message.push_str(text),
             }
         }
-        if !from_replay && matches!(item.phase, Some(MessagePhase::Commentary)) {
+        // Async questions use FinalAnswer as their presentation phase, but are
+        // delivered while the turn is still running. Forward them as text;
+        // only TurnCompleted may emit the terminal event and release the route.
+        if !from_replay
+            && (matches!(item.phase, Some(MessagePhase::Commentary))
+                || matches!(
+                    item.delivery,
+                    Some(codex_protocol::items::AgentMessageDelivery::Async)
+                ))
+        {
             let turn_route = self.remote_im_route_for_turn(turn_id);
             if turn_route.as_ref().is_some_and(|route| route.source_routed) {
                 crate::multi_ai_code_im_bridge::send_source_assistant_text(

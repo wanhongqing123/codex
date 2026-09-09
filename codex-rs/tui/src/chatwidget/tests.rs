@@ -256,6 +256,8 @@ mod plugin_catalog;
 mod popups_and_settings;
 #[path = "tests/rate_limit_recovery_tests.rs"]
 mod rate_limit_recovery_tests;
+#[path = "tests/remote_im_async_question_tests.rs"]
+mod remote_im_async_question;
 #[path = "tests/remote_im_route_lifecycle_tests.rs"]
 mod remote_im_route_lifecycle;
 mod review_mode;

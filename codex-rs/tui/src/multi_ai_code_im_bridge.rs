@@ -524,6 +524,10 @@ fn send_reliable_text(
 }
 
 fn send_reliable_payload(payload: serde_json::Value, message_id: String) {
+    #[cfg(test)]
+    if test_capture::record(&payload, &message_id) {
+        return;
+    }
     let Some(sender) = data_sender() else {
         return;
     };
@@ -912,6 +916,10 @@ fn parse_endpoint(endpoint: &str) -> Option<BridgeConfig> {
         })?,
     })
 }
+
+#[cfg(test)]
+#[path = "multi_ai_code_im_bridge_test_capture.rs"]
+pub(crate) mod test_capture;
 
 #[cfg(test)]
 mod tests {
