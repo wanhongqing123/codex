@@ -411,8 +411,10 @@ impl ChatWidget {
                     notification.turn.duration_ms,
                     replay_kind.is_some(),
                 );
-                if !source_routed
-                    && !active_goal_continuing
+                // Source-routed finals/errors release the host route even when
+                // a goal continues. Do not let a later machine-only turn inherit
+                // that completed capability. Legacy goal progress is nonterminal.
+                if (source_routed || !active_goal_continuing)
                     && let Some(route) = remote_im_route.as_ref()
                 {
                     self.clear_active_remote_im_route_if_matches(route);
@@ -445,6 +447,8 @@ impl ChatWidget {
                             route.task_id.as_deref(),
                         );
                     }
+                }
+                if let Some(route) = remote_im_route.as_ref() {
                     self.clear_active_remote_im_route_if_matches(route);
                 }
                 self.last_non_retry_error = None;
@@ -518,7 +522,7 @@ impl ChatWidget {
                     self.request_redraw();
                     self.maybe_send_next_queued_input();
                 }
-                if !source_routed && let Some(route) = remote_im_route.as_ref() {
+                if let Some(route) = remote_im_route.as_ref() {
                     self.clear_active_remote_im_route_if_matches(route);
                 }
             }
