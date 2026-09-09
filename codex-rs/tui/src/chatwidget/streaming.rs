@@ -71,6 +71,9 @@ impl ChatWidget {
                 });
                 self.note_stream_consolidation_queued();
                 self.app_event_tx.send(AppEvent::ConsolidateAgentMessage {
+                    message_id: completed_message
+                        .and(self.transcript.last_completed_agent_message.as_ref())
+                        .map(|(_, id)| id.clone()),
                     source,
                     cwd: self.config.cwd.to_path_buf(),
                     inline_visualization_context,
@@ -358,6 +361,11 @@ impl ChatWidget {
             }
         }
         let parsed = parse_assistant_markdown(&message, self.config.cwd.as_path());
+        tracing::info!(target: "codex_tui::history_diagnostics", "tui_history {}", serde_json::json!({
+            "event": "tui_history", "stage": "completion_received", "messageId": item.id,
+            "turnId": turn_id, "textLength": message.len(), "visibleLength": parsed.visible_markdown.len(),
+            "hasStream": self.stream_controller.is_some(), "replay": from_replay
+        }));
         self.finalize_completed_assistant_message(
             (!parsed.visible_markdown.is_empty()).then_some(parsed.visible_markdown.as_str()),
         );

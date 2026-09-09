@@ -1,5 +1,8 @@
 //! App-level orchestration tests for the TUI.
 
+#[path = "tests/completed_commentary_tests.rs"]
+mod completed_commentary_tests;
+
 #[path = "tests/advanced_reasoning_tests.rs"]
 mod advanced_reasoning_tests;
 #[path = "tests/agents_navigation_tests.rs"]
@@ -6118,6 +6121,7 @@ async fn directive_only_completion_removes_streamed_directive() -> Result<()> {
     let mut tui = crate::tui::test_support::make_test_tui()?;
     app.handle_consolidate_agent_message(
         &mut tui,
+        /*message_id*/ None,
         String::new(),
         PathBuf::from("/tmp"),
         /*inline_visualization_context*/ None,
@@ -6163,6 +6167,7 @@ async fn required_stream_reflow_during_capped_initial_replay_survives_transcript
     let mut tui = crate::tui::test_support::make_test_tui()?;
     app.handle_consolidate_agent_message(
         &mut tui,
+        /*message_id*/ None,
         "Final answer:\n\n| Pattern | Outcome |\n| --- | --- |\n| Table tail | Preserved |"
             .to_string(),
         PathBuf::from("/tmp"),

@@ -8,9 +8,9 @@ use super::rate_limit_refresh::RateLimitRefreshOutcome;
 use super::resize_reflow::trailing_run_start;
 use super::session_lifecycle::ThreadAttachPresentation;
 use super::*;
+use crate::app::app_server_requests::ResolvedAppServerRequest;
 use crate::app_event::RecapTrigger;
 use crate::app_event::ThreadTitleDestination;
-use crate::app::app_server_requests::ResolvedAppServerRequest;
 use crate::app_server_session::ForkGoalContinuation;
 use crate::app_server_session::UnsupportedLegacyPermissionProfile;
 use crate::app_server_session::turn_permissions_overrides;
@@ -963,6 +963,7 @@ impl App {
                 self.finish_initial_history_replay_buffer(tui);
             }
             AppEvent::ConsolidateAgentMessage {
+                message_id,
                 source,
                 cwd,
                 inline_visualization_context,
@@ -971,6 +972,7 @@ impl App {
             } => {
                 self.handle_consolidate_agent_message(
                     tui,
+                    message_id,
                     source,
                     cwd,
                     inline_visualization_context,

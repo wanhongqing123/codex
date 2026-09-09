@@ -25,6 +25,7 @@ impl App {
     pub(super) fn handle_consolidate_agent_message(
         &mut self,
         tui: &mut tui::Tui,
+        message_id: Option<String>,
         source: String,
         cwd: PathBuf,
         inline_visualization_context: Option<InlineVisualizationContext>,
@@ -50,6 +51,14 @@ impl App {
             source.len()
         );
         let start = trailing_run_start::<history_cell::AgentMessageCell>(&self.transcript_cells);
+        let outcome = if start < end {
+            "history_replaced"
+        } else if !source.trim().is_empty() {
+            "history_inserted"
+        } else {
+            "empty_completion"
+        };
+        let source_length = source.len();
         if start < end {
             tracing::debug!(
                 "ConsolidateAgentMessage: replacing cells [{start}..{end}] with AgentMarkdownCell"
@@ -70,13 +79,34 @@ impl App {
             }
 
             self.finish_agent_message_consolidation(tui, scrollback_reflow)?;
-        } else {
-            tracing::debug!(
-                "ConsolidateAgentMessage: no cells to consolidate(start={start}, end={end})",
+        } else if !source.trim().is_empty() {
+            // A stream controller can exist without having emitted a history
+            // cell (for example after an empty delta). Completion still carries
+            // authoritative text: preserve it in both scrollback and Ctrl+T.
+            tracing::warn!(
+                source_len = source.len(),
+                transcript_cells = end,
+                "ConsolidateAgentMessage: inserting completion without provisional cells"
             );
+            self.insert_history_cell(
+                tui,
+                Box::new(
+                    history_cell::AgentMarkdownCell::new_with_inline_visualizations(
+                        source,
+                        &cwd,
+                        inline_visualization_context,
+                    ),
+                ),
+            );
+            self.finish_agent_message_consolidation(tui, scrollback_reflow)?;
+        } else {
             self.maybe_finish_stream_reflow(tui)?;
         }
 
+        tracing::info!(target: "codex_tui::history_diagnostics", "tui_history {}", serde_json::json!({
+            "event": "tui_history", "stage": outcome, "messageId": message_id,
+            "textLength": source_length, "cellCount": self.transcript_cells.len(), "replacedCells": end - start
+        }));
         Ok(())
     }
 

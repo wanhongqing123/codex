@@ -1028,6 +1028,7 @@ pub(crate) enum AppEvent {
     /// `deferred_history_cell` lets callers add the final stream tail to the
     /// transcript without first writing its provisional render to scrollback.
     ConsolidateAgentMessage {
+        message_id: Option<String>,
         source: String,
         cwd: PathBuf,
         inline_visualization_context: Option<InlineVisualizationContext>,
