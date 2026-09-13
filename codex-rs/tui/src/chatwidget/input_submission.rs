@@ -123,12 +123,15 @@ impl ChatWidget {
                 break;
             };
             self.remote_im_turn_routes.remove(&oldest_turn_id);
+            self.remote_im_forwarded_items.retain(|(id, _)| id != &oldest_turn_id);
         }
         self.remote_im_turn_route_order.push_back(turn_id.clone());
         self.remote_im_turn_routes.insert(turn_id, route);
     }
 
     pub(super) fn finish_remote_im_turn_route(&mut self, turn_id: &str) {
+        self.remote_im_forwarded_items
+            .retain(|(id, _)| id != turn_id);
         if self.remote_im_turn_routes.remove(turn_id).is_some()
             && let Some(index) = self
                 .remote_im_turn_route_order
@@ -176,7 +179,7 @@ impl ChatWidget {
         display_text: String,
         local_image_paths: Vec<PathBuf>,
         remote_im_input: bool,
-        preserve_remote_im_route: bool,
+        _preserve_remote_im_route: bool,
         reply_id: Option<String>,
         task_id: Option<String>,
     ) -> Result<(), String> {
@@ -204,7 +207,7 @@ impl ChatWidget {
             history_record,
             ShellEscapePolicy::Disallow,
         );
-        if accepted && !preserve_remote_im_route {
+        if accepted {
             self.set_remote_im_input_origin(remote_im_input);
         }
         self.remember_remote_im_reply(

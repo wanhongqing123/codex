@@ -165,6 +165,7 @@ impl ChatWidget {
             remote_im_active_reply_id: None,
             remote_im_active_task_id: None,
             remote_im_turn_routes: HashMap::new(),
+            remote_im_forwarded_items: std::collections::HashSet::new(),
             remote_im_turn_route_order: VecDeque::new(),
             remote_im_pending_exec_approvals: HashMap::new(),
             plan_stream_controller: None,

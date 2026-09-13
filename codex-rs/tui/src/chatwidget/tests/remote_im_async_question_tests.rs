@@ -110,7 +110,15 @@ async fn remote_im_async_question_is_sent_immediately_without_ending_the_route()
         *phase = Some(MessagePhase::FinalAnswer);
     }
     deliver(&mut chat, answer.clone(), /*replay_kind*/ None);
-    assert_eq!(capture.drain(), Vec::new());
+    assert_eq!(
+        capture.drain(),
+        vec![(
+            json!({
+                "kind": "assistant_text", "text": "Done.", "replyId": "reply-a", "taskId": "task-a"
+            }),
+            "real-final".to_string()
+        )]
+    );
     let mut turn = app_server_turn(
         "turn-1",
         AppServerTurnStatus::Completed,
@@ -135,7 +143,7 @@ async fn remote_im_async_question_is_sent_immediately_without_ending_the_route()
             "real-final:final".to_string()
         )]
     );
-    assert_eq!(chat.remote_im_active_task_id, None);
+    assert_eq!(chat.remote_im_active_task_id.as_deref(), Some("task-a"));
 }
 
 #[tokio::test]
@@ -156,5 +164,85 @@ async fn remote_im_async_question_without_a_route_is_not_sent_to_another_recipie
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let capture = Capture::start();
     deliver(&mut chat, async_question(), /*replay_kind*/ None);
+    assert_eq!(capture.drain(), Vec::new());
+}
+
+#[tokio::test]
+async fn remote_im_all_answers_are_ordinary_messages_and_idle_does_not_stop_forwarding() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    bind_source_route(&mut chat);
+    let capture = Capture::start();
+    let answer = |id: &str, text: &str| AppServerThreadItem::AgentMessage {
+        id: id.to_string(),
+        text: text.to_string(),
+        phase: Some(MessagePhase::FinalAnswer),
+        memory_citation: None,
+        delivery: None,
+        questions: None,
+    };
+    let first = answer("greeting", "你好，我在。");
+    let last = answer("recall", "记得以前的任务。");
+    for item in [first.clone(), last.clone()] {
+        deliver(&mut chat, item, /*replay_kind*/ None);
+    }
+    assert_eq!(
+        capture.drain(),
+        vec![
+            (
+                json!({"kind":"assistant_text", "text":"你好，我在。", "replyId":"reply-a", "taskId":"task-a"}),
+                "greeting".to_string()
+            ),
+            (
+                json!({"kind":"assistant_text", "text":"记得以前的任务。", "replyId":"reply-a", "taskId":"task-a"}),
+                "recall".to_string()
+            ),
+        ]
+    );
+    let mut turn = app_server_turn(
+        "turn-1",
+        AppServerTurnStatus::Completed,
+        /*duration_ms*/ None,
+        /*error*/ None,
+    );
+    turn.items = vec![first.clone(), last.clone()];
+    chat.handle_server_notification(
+        ServerNotification::TurnCompleted(TurnCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn: turn.clone(),
+        }),
+        /*replay_kind*/ None,
+    );
+    assert_eq!(
+        capture.drain(),
+        vec![(
+            json!({"kind":"assistant_final", "text":"记得以前的任务。", "replyId":"reply-a", "taskId":"task-a"}),
+            "recall:final".to_string()
+        )]
+    );
+    assert!(chat.remote_im_forwarding_active);
+    assert_eq!(chat.remote_im_active_task_id.as_deref(), Some("task-a"));
+    chat.handle_server_notification(
+        ServerNotification::TurnCompleted(TurnCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn,
+        }),
+        Some(ReplayKind::ResumeInitialMessages),
+    );
+    assert_eq!(capture.drain(), Vec::new());
+    chat.remember_remote_im_turn_route_if_absent(
+        "turn-1".to_string(),
+        RemoteImTurnRoute {
+            reply_id: "reply-a".to_string(),
+            task_id: Some("task-a".to_string()),
+            source_routed: true,
+        },
+    );
+    chat.set_remote_im_input_origin(false);
+    capture.drain();
+    deliver(
+        &mut chat,
+        answer("late", "Must not leak after input takeover"),
+        /*replay_kind*/ None,
+    );
     assert_eq!(capture.drain(), Vec::new());
 }

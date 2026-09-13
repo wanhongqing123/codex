@@ -1,4 +1,4 @@
-//! A host route ends at a structured final/error, not at the next local keystroke.
+//! Executions end independently of the input-owned forwarding subscription.
 //! Exercise the notification handlers and the machine-message/human-steer sequence.
 
 use super::*;
@@ -100,12 +100,15 @@ async fn completed_source_route_is_not_reused_by_machine_turn_before_human_steer
         })
     );
     complete_remote_turn(&mut chat, "turn-2", AppServerTurnStatus::Completed);
+    assert_eq!(chat.remote_im_active_reply_id.as_deref(), Some("reply-b"));
+    assert_eq!(chat.remote_im_active_task_id.as_deref(), Some("task-b"));
+    chat.set_remote_im_input_origin(false);
     assert_eq!(chat.remote_im_active_reply_id, None);
     assert_eq!(chat.remote_im_active_task_id, None);
 }
 
 #[tokio::test]
-async fn source_route_terminal_notifications_clear_only_the_matching_active_route() {
+async fn source_execution_completion_preserves_the_forwarding_subscription() {
     for status in [
         AppServerTurnStatus::Completed,
         AppServerTurnStatus::Interrupted,
@@ -126,11 +129,7 @@ async fn source_route_terminal_notifications_clear_only_the_matching_active_rout
                 },
             );
             complete_remote_turn(&mut chat, "turn-a", status.clone());
-            let expected = if active_task == "task-b" {
-                (Some(active_reply.as_str()), Some(active_task))
-            } else {
-                (None, None)
-            };
+            let expected = (Some(active_reply.as_str()), Some(active_task));
             assert_eq!(
                 (
                     chat.remote_im_active_reply_id.as_deref(),
@@ -145,7 +144,7 @@ async fn source_route_terminal_notifications_clear_only_the_matching_active_rout
 }
 
 #[tokio::test]
-async fn source_goal_final_releases_route_while_legacy_goal_progress_preserves_it() {
+async fn source_goal_completion_does_not_close_forwarding() {
     for source_routed in [false, true] {
         let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
         chat.remote_im_forwarding_active = source_routed;
@@ -175,11 +174,8 @@ async fn source_goal_final_releases_route_while_legacy_goal_progress_preserves_i
         complete_remote_turn(&mut chat, "turn-goal", AppServerTurnStatus::Completed);
         assert_eq!(
             chat.remote_im_active_reply_id.as_deref(),
-            (!source_routed).then_some("reply-goal")
+            Some("reply-goal")
         );
-        assert_eq!(
-            chat.remote_im_active_task_id.as_deref(),
-            (!source_routed).then_some("task-goal")
-        );
+        assert_eq!(chat.remote_im_active_task_id.as_deref(), Some("task-goal"));
     }
 }

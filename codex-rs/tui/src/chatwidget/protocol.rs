@@ -316,19 +316,6 @@ impl ChatWidget {
         self.thread_usage.replaying_turn_completion = replay_kind.is_some();
         match notification.turn.status {
             TurnStatus::Completed => {
-                let remote_im_route = self.remote_im_route_for_turn(notification.turn.id.as_str());
-                let source_routed = remote_im_route
-                    .as_ref()
-                    .is_some_and(|route| route.source_routed);
-                let active_goal_continuing = self
-                    .current_goal_status
-                    .as_ref()
-                    .is_some_and(GoalStatusState::is_active);
-                let remote_im_reply_id =
-                    remote_im_route.as_ref().map(|route| route.reply_id.clone());
-                let remote_im_task_id = remote_im_route
-                    .as_ref()
-                    .and_then(|route| route.task_id.clone());
                 let last_agent_message =
                     notification
                         .turn
@@ -360,49 +347,46 @@ impl ChatWidget {
                             .map_or(ThreadItemRenderSource::Live, ThreadItemRenderSource::Replay),
                     );
                 }
-                if replay_kind.is_none() {
-                    if source_routed {
-                        if let Some((_, id, text)) = &last_agent_message {
-                            crate::multi_ai_code_im_bridge::send_source_assistant_final(
-                                text,
-                                Some(id.as_str()),
-                                remote_im_reply_id.as_deref(),
-                                remote_im_task_id.as_deref(),
-                            );
-                        } else {
-                            crate::multi_ai_code_im_bridge::send_source_turn_error(
-                                "Codex turn completed without a final assistant response.",
-                                Some(notification.turn.id.as_str()),
-                                remote_im_reply_id.as_deref(),
-                                remote_im_task_id.as_deref(),
-                            );
-                        }
-                    } else if active_goal_continuing && remote_im_reply_id.is_some() {
-                        if let Some((_, id, text)) = &last_agent_message {
-                            crate::multi_ai_code_im_bridge::send_assistant_text(
-                                text,
-                                Some(id.as_str()),
-                                remote_im_task_id.as_deref(),
-                            );
-                        } else if let Some(task_id) = remote_im_task_id.as_deref() {
-                            crate::multi_ai_code_im_bridge::send_task_activity(task_id);
-                        }
-                    } else if let Some(reply_id) = remote_im_reply_id {
-                        if let Some((_, id, text)) = &last_agent_message {
-                            crate::multi_ai_code_im_bridge::send_assistant_final(
-                                text,
-                                Some(id.as_str()),
-                                &reply_id,
-                                remote_im_task_id.as_deref(),
-                            );
-                        } else {
-                            crate::multi_ai_code_im_bridge::send_turn_error(
-                                "Codex turn completed without a final assistant response.",
-                                Some(notification.turn.id.as_str()),
-                                &reply_id,
-                                remote_im_task_id.as_deref(),
-                            );
-                        }
+                // Forward each user-visible item uniformly. This also recovers an
+                // item missing from the live stream; item IDs suppress duplicates.
+                for item in &notification.turn.items {
+                    if let ThreadItem::AgentMessage { id, text, .. } = item {
+                        self.forward_remote_im_text_item(
+                            &completed_turn_id,
+                            id,
+                            text,
+                            replay_kind.is_some(),
+                        );
+                    }
+                }
+                // Keep the legacy completion protocol for execution bookkeeping.
+                // Every text item was already forwarded independently; the host
+                // deduplicates this payload and keeps the forwarding subscription.
+                if replay_kind.is_none()
+                    && let Some(route) = self.remote_im_route_for_turn(&completed_turn_id)
+                {
+                    if let Some((id, text)) =
+                        notification.turn.items.iter().rev().find_map(|item| {
+                            if let ThreadItem::AgentMessage { id, text, .. } = item {
+                                Some((id, text))
+                            } else {
+                                None
+                            }
+                        })
+                    {
+                        crate::multi_ai_code_im_bridge::send_source_assistant_final(
+                            text,
+                            Some(id.as_str()),
+                            Some(route.reply_id.as_str()),
+                            route.task_id.as_deref(),
+                        );
+                    } else {
+                        crate::multi_ai_code_im_bridge::send_source_turn_error(
+                            "Codex turn completed without assistant output.",
+                            Some(completed_turn_id.as_str()),
+                            Some(route.reply_id.as_str()),
+                            route.task_id.as_deref(),
+                        );
                     }
                 }
                 self.last_non_retry_error = None;
@@ -411,14 +395,6 @@ impl ChatWidget {
                     notification.turn.duration_ms,
                     replay_kind.is_some(),
                 );
-                // Source-routed finals/errors release the host route even when
-                // a goal continues. Do not let a later machine-only turn inherit
-                // that completed capability. Legacy goal progress is nonterminal.
-                if (source_routed || !active_goal_continuing)
-                    && let Some(route) = remote_im_route.as_ref()
-                {
-                    self.clear_active_remote_im_route_if_matches(route);
-                }
             }
             TurnStatus::Interrupted => {
                 let remote_im_route = self.remote_im_route_for_turn(notification.turn.id.as_str());
@@ -448,7 +424,9 @@ impl ChatWidget {
                         );
                     }
                 }
-                if let Some(route) = remote_im_route.as_ref() {
+                if !self.remote_im_forwarding_active
+                    && let Some(route) = remote_im_route.as_ref()
+                {
                     self.clear_active_remote_im_route_if_matches(route);
                 }
                 self.last_non_retry_error = None;
@@ -522,7 +500,9 @@ impl ChatWidget {
                     self.request_redraw();
                     self.maybe_send_next_queued_input();
                 }
-                if let Some(route) = remote_im_route.as_ref() {
+                if !self.remote_im_forwarding_active
+                    && let Some(route) = remote_im_route.as_ref()
+                {
                     self.clear_active_remote_im_route_if_matches(route);
                 }
             }

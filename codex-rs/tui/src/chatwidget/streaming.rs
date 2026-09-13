@@ -314,6 +314,33 @@ impl ChatWidget {
         );
     }
 
+    pub(super) fn forward_remote_im_text_item(
+        &mut self,
+        turn_id: &str,
+        item_id: &str,
+        text: &str,
+        from_replay: bool,
+    ) {
+        if from_replay || !self.remote_im_forwarding_active || text.trim().is_empty() {
+            return;
+        }
+        let Some(route) = self.remote_im_route_for_turn(turn_id) else {
+            return;
+        };
+        if !self
+            .remote_im_forwarded_items
+            .insert((turn_id.to_string(), item_id.to_string()))
+        {
+            return;
+        }
+        crate::multi_ai_code_im_bridge::send_source_assistant_text(
+            text,
+            Some(item_id),
+            Some(route.reply_id.as_str()),
+            route.task_id.as_deref(),
+        );
+    }
+
     /// Handle completion of an `AgentMessage` turn item.
     ///
     /// Commentary completion sets a deferred restore flag so the status row
@@ -332,34 +359,7 @@ impl ChatWidget {
                 AgentMessageContent::Text { text } => message.push_str(text),
             }
         }
-        // Async questions use FinalAnswer as their presentation phase, but are
-        // delivered while the turn is still running. Forward them as text;
-        // only TurnCompleted may emit the terminal event and release the route.
-        if !from_replay
-            && (matches!(item.phase, Some(MessagePhase::Commentary))
-                || matches!(
-                    item.delivery,
-                    Some(codex_protocol::items::AgentMessageDelivery::Async)
-                ))
-        {
-            let turn_route = self.remote_im_route_for_turn(turn_id);
-            if turn_route.as_ref().is_some_and(|route| route.source_routed) {
-                crate::multi_ai_code_im_bridge::send_source_assistant_text(
-                    &message,
-                    Some(item.id.as_str()),
-                    turn_route.as_ref().map(|route| route.reply_id.as_str()),
-                    turn_route
-                        .as_ref()
-                        .and_then(|route| route.task_id.as_deref()),
-                );
-            } else if let Some(route) = turn_route {
-                crate::multi_ai_code_im_bridge::send_assistant_text(
-                    &message,
-                    Some(item.id.as_str()),
-                    route.task_id.as_deref(),
-                );
-            }
-        }
+        self.forward_remote_im_text_item(turn_id, &item.id, &message, from_replay);
         let parsed = parse_assistant_markdown(&message, self.config.cwd.as_path());
         tracing::info!(target: "codex_tui::history_diagnostics", "tui_history {}", serde_json::json!({
             "event": "tui_history", "stage": "completion_received", "messageId": item.id,

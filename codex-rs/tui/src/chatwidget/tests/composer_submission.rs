@@ -508,7 +508,7 @@ async fn direct_tui_input_consumes_an_unbound_remote_route() {
 }
 
 #[tokio::test]
-async fn machine_remote_im_steer_preserves_human_forwarding_authority() {
+async fn machine_remote_im_input_stops_human_forwarding() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.set_remote_im_input_origin(true);
 
@@ -525,7 +525,7 @@ async fn machine_remote_im_steer_preserves_human_forwarding_authority() {
         Ok(())
     );
 
-    assert!(chat.remote_im_forwarding_active);
+    assert!(!chat.remote_im_forwarding_active);
 }
 
 #[tokio::test]

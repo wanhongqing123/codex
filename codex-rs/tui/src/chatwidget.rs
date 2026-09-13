@@ -640,6 +640,7 @@ pub(crate) struct ChatWidget {
     remote_im_active_reply_id: Option<String>,
     remote_im_active_task_id: Option<String>,
     remote_im_turn_routes: HashMap<String, RemoteImTurnRoute>,
+    remote_im_forwarded_items: std::collections::HashSet<(String, String)>,
     remote_im_turn_route_order: VecDeque<String>,
     remote_im_pending_exec_approvals: HashMap<String, RemoteImPendingExecApproval>,
     // Stream lifecycle controller for proposed plan output.
