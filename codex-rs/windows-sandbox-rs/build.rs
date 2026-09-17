@@ -7,6 +7,17 @@ const SETUP_MANIFEST: &str = "codex-windows-sandbox-setup.manifest";
 fn main() -> Result<(), String> {
     println!("cargo:rerun-if-changed={SETUP_MANIFEST}");
 
+    // Multi-AI Code 定制：下面整段只服务于 `codex-windows-sandbox-setup` 这个
+    // 可执行目标——给它嵌一份请求提权的 UAC 清单。该目标已经在本包的
+    // Cargo.toml 里被注释掉（连同 `codex-command-runner`），因为
+    // elevated 沙箱那一档整体不再提供。
+    //
+    // 目标没了之后 `cargo:rustc-link-arg-bin=<目标名>=...` 会直接让构建失败，
+    // 报 "invalid instruction"——所以这里必须一起短路，光注释 [[bin]] 是不够的。
+    // 恢复 elevated 时把这两行删掉即可。
+    return Ok(());
+
+    #[allow(unreachable_code)]
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return Ok(());
     }

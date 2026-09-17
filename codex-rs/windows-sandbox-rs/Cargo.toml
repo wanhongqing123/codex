@@ -10,13 +10,28 @@ name = "codex_windows_sandbox"
 path = "src/lib.rs"
 doctest = false
 
-[[bin]]
-name = "codex-windows-sandbox-setup"
-path = "src/bin/setup_main/main.rs"
-
-[[bin]]
-name = "codex-command-runner"
-path = "src/bin/command_runner/main.rs"
+# Multi-AI Code 定制：这两个可执行目标不再构建。
+#
+# 它们只服务于 Windows 沙箱的 elevated 这一档——那一档要用一个专门创建的
+# Windows 用户来跑命令，而进程一旦启动就不能改变自己的用户身份，所以必须
+# 有一个独立的 exe 被 CreateProcessAsUser 拉起来当代理。
+# 另外两档不需要它：disabled 不隔离，unelevated 用当前用户加受限令牌，
+# 直接拉子进程就行。
+#
+# 而 elevated 这一档已经在 config/src/types.rs 的 WindowsSandboxModeToml
+# 反序列化处被拒绝了，配置里根本写不进来，这两个 exe 也就永远不会被调用——
+# 留着只是白白多出约 23.7MB 和一份构建时间。
+#
+# 要恢复：把下面两段注释解开，同时撤销 config/src/types.rs 里的拒绝，
+# 并把主仓 scripts/build-aicli-codex.mjs 里对应两项的 bundled 改回 true。
+#
+# [[bin]]
+# name = "codex-windows-sandbox-setup"
+# path = "src/bin/setup_main/main.rs"
+#
+# [[bin]]
+# name = "codex-command-runner"
+# path = "src/bin/command_runner/main.rs"
 
 [lints]
 workspace = true

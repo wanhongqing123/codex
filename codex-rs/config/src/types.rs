@@ -155,11 +155,48 @@ impl Default for AuthKeyringBackendKind {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema)]
+/// Multi-AI Code 定制：`elevated` 这一档被下掉了。
+///
+/// 原因是它要求打包两个只在这一档用得上的辅助程序
+/// （`codex-windows-sandbox-setup.exe` 与 `codex-command-runner.exe`，合计约 23.7MB）。
+/// 本产品不提供 elevated 隔离，那两个程序也就不再打包
+/// （见主仓 `scripts/build-aicli-codex.mjs` 的 CODEX_BINARIES 表）。
+///
+/// 为什么是在这里拒绝，而不是把 `Elevated` 从枚举里删掉：
+/// 那个变体在上游有三十多处引用，物理删除等于每次同步上游都要重新打一遍补丁。
+/// 在配置入口一次性挡住，效果相同而改动面只有这一处。
+/// 这也是上游自己废弃 `wire_api = "chat"` 时用的同一种写法
+/// （见 `model-provider-info/src/lib.rs` 的 `CHAT_WIRE_API_REMOVED_ERROR`）。
+///
+/// 要恢复这一档：删掉下面手写的 `Deserialize`、把 `Deserialize` 加回 derive，
+/// 再把 `windows-sandbox-rs/Cargo.toml` 里那两个 `[[bin]]` 和主仓打包表里的
+/// `bundled: false` 一起改回来。
+const ELEVATED_SANDBOX_REMOVED_ERROR: &str = "`[windows] sandbox = \"elevated\"` 在本产品中不可用。
+如何处理：改成 `unelevated`，或者直接删掉 `[windows] sandbox` 这一项以不启用沙箱。
+说明：elevated 需要额外打包两个辅助程序（约 23.7MB），本产品未包含它们。";
+
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum WindowsSandboxModeToml {
+    /// 保留这个变体只是为了不动上游那三十多处引用；配置里再也解析不出它。
     Elevated,
     Unelevated,
+}
+
+impl<'de> Deserialize<'de> for WindowsSandboxModeToml {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match value.as_str() {
+            "unelevated" => Ok(Self::Unelevated),
+            // 明确报错而不是静默降级：静默降级会让人以为自己开着 elevated 隔离，
+            // 那比不隔离更危险。
+            "elevated" => Err(serde::de::Error::custom(ELEVATED_SANDBOX_REMOVED_ERROR)),
+            _ => Err(serde::de::Error::unknown_variant(&value, &["unelevated"])),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
