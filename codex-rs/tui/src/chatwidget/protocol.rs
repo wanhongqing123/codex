@@ -148,6 +148,11 @@ impl ChatWidget {
                     }
                 } else {
                     if !from_replay {
+                        // A terminal error can arrive before TurnStarted (for example,
+                        // when the account usage limit rejects the request). Bind the
+                        // oldest accepted Remote IM submission now so its error is not
+                        // left visible only in the local TUI.
+                        self.bind_pending_remote_im_route_to_turn(notification.turn_id.as_str());
                         let turn_route =
                             self.remote_im_route_for_turn(notification.turn_id.as_str());
                         if turn_route.as_ref().is_some_and(|route| route.source_routed) {

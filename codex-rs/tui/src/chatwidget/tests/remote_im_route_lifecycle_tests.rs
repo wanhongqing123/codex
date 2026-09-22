@@ -2,7 +2,9 @@
 //! Exercise the notification handlers and the machine-message/human-steer sequence.
 
 use super::*;
+use crate::multi_ai_code_im_bridge::test_capture::Capture;
 use pretty_assertions::assert_eq;
+use serde_json::json;
 
 fn complete_remote_turn(chat: &mut ChatWidget, turn_id: &str, status: AppServerTurnStatus) {
     let mut turn = app_server_turn(
@@ -24,6 +26,50 @@ fn complete_remote_turn(chat: &mut ChatWidget, turn_id: &str, status: AppServerT
             turn,
         }),
         /*replay_kind*/ None,
+    );
+}
+
+#[tokio::test]
+async fn terminal_error_before_turn_started_is_forwarded_to_remote_im() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.submit_user_message_from_remote_im(
+        "hello".to_string(),
+        "hello".to_string(),
+        Vec::new(),
+        /*remote_im_input*/ true,
+        /*preserve_remote_im_route*/ false,
+        Some("reply-before-start".to_string()),
+        Some("task-before-start".to_string()),
+    )
+    .unwrap();
+    let capture = Capture::start();
+
+    chat.handle_server_notification(
+        ServerNotification::Error(ErrorNotification {
+            error: AppServerTurnError {
+                misalignment: None,
+                message: "You've hit your usage limit. Try again later.".to_string(),
+                codex_error_info: Some(CodexErrorInfo::UsageLimitExceeded),
+                additional_details: None,
+            },
+            will_retry: false,
+            thread_id: chat.thread_id.map(|id| id.to_string()).unwrap_or_default(),
+            turn_id: "turn-before-start".to_string(),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    assert_eq!(
+        capture.drain(),
+        vec![(
+            json!({
+                "kind": "turn_error",
+                "text": "You've hit your usage limit. Try again later.",
+                "replyId": "reply-before-start",
+                "taskId": "task-before-start"
+            }),
+            "turn-before-start:error".to_string()
+        )]
     );
 }
 
