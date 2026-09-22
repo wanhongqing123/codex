@@ -256,8 +256,8 @@ pub(crate) fn send_task_started(reply_id: &str, task_id: Option<&str>) {
     send_reliable_text("task_started", "running", None, Some(reply_id), task_id);
 }
 
-pub(crate) fn send_task_activity(task_id: &str) {
-    send_reliable_text("task_activity", "running", None, None, Some(task_id));
+pub(crate) fn send_task_activity(task_id: &str, activity: &str) {
+    send_reliable_text("task_activity", activity, None, None, Some(task_id));
 }
 
 pub(crate) fn send_input_origin(remote_im: bool) {
@@ -270,8 +270,12 @@ pub(crate) fn send_input_origin(remote_im: bool) {
     );
 }
 
-pub(crate) fn send_source_task_activity(reply_id: Option<&str>, task_id: Option<&str>) {
-    send_reliable_text("task_activity", "running", None, reply_id, task_id);
+pub(crate) fn send_source_task_activity(
+    reply_id: Option<&str>,
+    task_id: Option<&str>,
+    activity: &str,
+) {
+    send_reliable_text("task_activity", activity, None, reply_id, task_id);
 }
 
 pub(crate) fn send_source_assistant_text(

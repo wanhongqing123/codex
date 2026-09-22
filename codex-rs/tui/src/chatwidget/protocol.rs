@@ -72,11 +72,12 @@ impl ChatWidget {
                         crate::multi_ai_code_im_bridge::send_source_task_activity(
                             turn_route.map(|route| route.reply_id.as_str()),
                             turn_route.and_then(|route| route.task_id.as_deref()),
+                            "working",
                         );
                     } else if let Some(task_id) =
                         turn_route.and_then(|route| route.task_id.as_deref())
                     {
-                        crate::multi_ai_code_im_bridge::send_task_activity(task_id);
+                        crate::multi_ai_code_im_bridge::send_task_activity(task_id, "working");
                     }
                     self.on_task_started();
                 }
@@ -102,7 +103,19 @@ impl ChatWidget {
                     self.on_agent_reasoning_delta(notification.delta);
                 }
             }
-            ServerNotification::ReasoningSummaryPartAdded(_) => self.on_reasoning_section_break(),
+            ServerNotification::ReasoningSummaryPartAdded(notification) => {
+                if !from_replay
+                    && self.remote_im_forwarding_active
+                    && let Some(route) = self.remote_im_route_for_turn(&notification.turn_id)
+                {
+                    crate::multi_ai_code_im_bridge::send_source_task_activity(
+                        Some(route.reply_id.as_str()),
+                        route.task_id.as_deref(),
+                        "thinking",
+                    );
+                }
+                self.on_reasoning_section_break()
+            }
             ServerNotification::TerminalInteraction(notification) => {
                 self.on_terminal_interaction(notification.process_id, notification.stdin)
             }
@@ -419,15 +432,15 @@ impl ChatWidget {
                                 .and_then(|route| route.task_id.as_deref()),
                         );
                     }
-                } else if let Some(route) = remote_im_route.as_ref() {
-                    if replay_kind.is_none() {
-                        crate::multi_ai_code_im_bridge::send_turn_error(
-                            "Codex turn was interrupted.",
-                            Some(notification.turn.id.as_str()),
-                            &route.reply_id,
-                            route.task_id.as_deref(),
-                        );
-                    }
+                } else if let Some(route) = remote_im_route.as_ref()
+                    && replay_kind.is_none()
+                {
+                    crate::multi_ai_code_im_bridge::send_turn_error(
+                        "Codex turn was interrupted.",
+                        Some(notification.turn.id.as_str()),
+                        &route.reply_id,
+                        route.task_id.as_deref(),
+                    );
                 }
                 if !self.remote_im_forwarding_active
                     && let Some(route) = remote_im_route.as_ref()
@@ -524,6 +537,27 @@ impl ChatWidget {
         notification: ItemStartedNotification,
         from_replay: bool,
     ) {
+        let reports_tool_activity = matches!(
+            &notification.item,
+            ThreadItem::CommandExecution { .. }
+                | ThreadItem::FileChange { .. }
+                | ThreadItem::McpToolCall { .. }
+                | ThreadItem::DynamicToolCall { .. }
+                | ThreadItem::WebSearch(_)
+                | ThreadItem::ImageGeneration(_)
+                | ThreadItem::CollabAgentToolCall { .. }
+        );
+        if !from_replay
+            && self.remote_im_forwarding_active
+            && reports_tool_activity
+            && let Some(route) = self.remote_im_route_for_turn(&notification.turn_id)
+        {
+            crate::multi_ai_code_im_bridge::send_source_task_activity(
+                Some(route.reply_id.as_str()),
+                route.task_id.as_deref(),
+                "tool",
+            );
+        }
         match notification.item {
             item @ ThreadItem::CommandExecution { .. } => self.on_command_execution_started(item),
             ThreadItem::FileChange { id: _, changes, .. } => {
@@ -569,6 +603,27 @@ impl ChatWidget {
         notification: ItemCompletedNotification,
         replay_kind: Option<ReplayKind>,
     ) {
+        let reports_tool_activity = matches!(
+            &notification.item,
+            ThreadItem::CommandExecution { .. }
+                | ThreadItem::FileChange { .. }
+                | ThreadItem::McpToolCall { .. }
+                | ThreadItem::DynamicToolCall { .. }
+                | ThreadItem::WebSearch(_)
+                | ThreadItem::ImageGeneration(_)
+                | ThreadItem::CollabAgentToolCall { .. }
+        );
+        if replay_kind.is_none()
+            && self.remote_im_forwarding_active
+            && reports_tool_activity
+            && let Some(route) = self.remote_im_route_for_turn(&notification.turn_id)
+        {
+            crate::multi_ai_code_im_bridge::send_source_task_activity(
+                Some(route.reply_id.as_str()),
+                route.task_id.as_deref(),
+                "working",
+            );
+        }
         match notification.item {
             item @ ThreadItem::CommandExecution { .. } => self.on_command_execution_completed(item),
             item => self.handle_thread_item(

@@ -53,6 +53,11 @@ impl ChatWidget {
         // must never race ahead of the allow-list used to validate its decision.
         self.remote_im_pending_exec_approvals
             .insert(approval_id.clone(), pending);
+        crate::multi_ai_code_im_bridge::send_source_task_activity(
+            Some(route.reply_id.as_str()),
+            Some(&task_id),
+            "waiting",
+        );
         match crate::multi_ai_code_im_bridge::send_approval_request(
             thread_id,
             ev,
@@ -163,6 +168,11 @@ impl ChatWidget {
             Some(&pending.task_id),
             decision,
             source.map(crate::app::app_server_requests::ExecApprovalResolutionSource::as_str),
+        );
+        crate::multi_ai_code_im_bridge::send_source_task_activity(
+            pending.reply_id.as_deref(),
+            Some(&pending.task_id),
+            "working",
         );
     }
 

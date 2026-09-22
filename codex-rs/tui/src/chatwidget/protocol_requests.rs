@@ -46,6 +46,16 @@ impl ChatWidget {
                 }
             }
             ServerRequest::ToolRequestUserInput { params, .. } => {
+                if replay_kind.is_none()
+                    && self.remote_im_forwarding_active
+                    && let Some(route) = self.remote_im_route_for_turn(&params.turn_id)
+                {
+                    crate::multi_ai_code_im_bridge::send_source_task_activity(
+                        Some(route.reply_id.as_str()),
+                        route.task_id.as_deref(),
+                        "waiting",
+                    );
+                }
                 self.on_request_user_input(params);
             }
             ServerRequest::DynamicToolCall { .. }

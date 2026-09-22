@@ -225,3 +225,42 @@ async fn source_goal_completion_does_not_close_forwarding() {
         assert_eq!(chat.remote_im_active_task_id.as_deref(), Some("task-goal"));
     }
 }
+
+#[tokio::test]
+async fn remote_im_activity_follows_reasoning_and_stops_after_local_takeover() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.submit_user_message_from_remote_im(
+        "test activity".to_string(),
+        "test activity".to_string(),
+        Vec::new(),
+        /*remote_im_input*/ true,
+        /*preserve_remote_im_route*/ false,
+        Some("activity-reply".to_string()),
+        Some("activity-task".to_string()),
+    )
+    .unwrap();
+    handle_turn_started(&mut chat, "activity-turn");
+    let capture = Capture::start();
+    let notification = ServerNotification::ReasoningSummaryPartAdded(
+        codex_app_server_protocol::ReasoningSummaryPartAddedNotification {
+            thread_id: chat.thread_id.map(|id| id.to_string()).unwrap_or_default(),
+            turn_id: "activity-turn".to_string(),
+            item_id: "reasoning".to_string(),
+            summary_index: 0,
+        },
+    );
+    chat.handle_server_notification(notification.clone(), /*replay_kind*/ None);
+    let payloads: Vec<_> = capture
+        .drain()
+        .into_iter()
+        .map(|(payload, _)| payload)
+        .collect();
+    assert_eq!(
+        payloads,
+        vec![json!({"kind":"task_activity", "text":"thinking",
+        "replyId":"activity-reply", "taskId":"activity-task"})]
+    );
+    chat.remote_im_forwarding_active = false;
+    chat.handle_server_notification(notification, /*replay_kind*/ None);
+    assert_eq!(capture.drain(), Vec::new());
+}
