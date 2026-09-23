@@ -1,6 +1,20 @@
 use super::*;
 
 impl ChatWidget {
+    fn send_remote_im_thinking_activity(&self, turn_id: &str, from_replay: bool) {
+        if from_replay || !self.remote_im_forwarding_active {
+            return;
+        }
+        let Some(route) = self.remote_im_route_for_turn(turn_id) else {
+            return;
+        };
+        crate::multi_ai_code_im_bridge::send_source_task_activity(
+            Some(route.reply_id.as_str()),
+            route.task_id.as_deref(),
+            "thinking",
+        );
+    }
+
     pub(crate) fn handle_server_notification(
         &mut self,
         notification: ServerNotification,
@@ -134,6 +148,7 @@ impl ChatWidget {
                 self.on_plan_delta(notification.delta);
             }
             ServerNotification::ReasoningSummaryTextDelta(notification) => {
+                self.send_remote_im_thinking_activity(&notification.turn_id, from_replay);
                 if !self.is_realtime_delegated_reasoning_item(
                     &notification.turn_id,
                     &notification.item_id,
@@ -144,6 +159,7 @@ impl ChatWidget {
                 }
             }
             ServerNotification::ReasoningTextDelta(notification) => {
+                self.send_remote_im_thinking_activity(&notification.turn_id, from_replay);
                 if self.config.show_raw_agent_reasoning
                     && !self.is_realtime_delegated_reasoning_item(
                         &notification.turn_id,
@@ -155,16 +171,6 @@ impl ChatWidget {
                 }
             }
             ServerNotification::ReasoningSummaryPartAdded(notification) => {
-                if !from_replay
-                    && self.remote_im_forwarding_active
-                    && let Some(route) = self.remote_im_route_for_turn(&notification.turn_id)
-                {
-                    crate::multi_ai_code_im_bridge::send_source_task_activity(
-                        Some(route.reply_id.as_str()),
-                        route.task_id.as_deref(),
-                        "thinking",
-                    );
-                }
                 if !self.is_realtime_delegated_reasoning_item(
                     &notification.turn_id,
                     &notification.item_id,

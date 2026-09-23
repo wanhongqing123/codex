@@ -241,11 +241,12 @@ async fn remote_im_activity_follows_reasoning_and_stops_after_local_takeover() {
     .unwrap();
     handle_turn_started(&mut chat, "activity-turn");
     let capture = Capture::start();
-    let notification = ServerNotification::ReasoningSummaryPartAdded(
-        codex_app_server_protocol::ReasoningSummaryPartAddedNotification {
+    let notification = ServerNotification::ReasoningSummaryTextDelta(
+        codex_app_server_protocol::ReasoningSummaryTextDeltaNotification {
             thread_id: chat.thread_id.map(|id| id.to_string()).unwrap_or_default(),
             turn_id: "activity-turn".to_string(),
             item_id: "reasoning".to_string(),
+            delta: "thinking about the answer".to_string(),
             summary_index: 0,
         },
     );
