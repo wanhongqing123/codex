@@ -58,7 +58,7 @@ pub(crate) fn resolve_editor_command() -> std::result::Result<Vec<String>, Edito
 }
 
 pub(super) fn editor_directory(
-    candidate_homes: &[&Path],
+    codex_home: &Path,
     file_system_policy: &FileSystemSandboxPolicy,
     cwd: &Path,
 ) -> Result<PathBuf> {
@@ -86,88 +86,55 @@ pub(super) fn editor_directory(
     } else {
         Vec::new()
     };
-    let mut error = Report::msg("editor directory must not be writable");
-    let mut rejected_writable = false;
+    let canonical_home = match dunce::canonicalize(codex_home) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = codex_home
+                .parent()
+                .ok_or_else(|| Report::msg("editor directory has no parent"))?;
+            let name = codex_home
+                .file_name()
+                .ok_or_else(|| Report::msg("editor directory has no parent"))?;
+            dunce::canonicalize(parent)?.join(name)
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let editor_directory = canonical_home.join("editor");
+    let logical_editor_directory = codex_home.join("editor");
 
-    for candidate_home in candidate_homes {
-        let canonical_home = match dunce::canonicalize(candidate_home) {
-            Ok(path) => path,
-            Err(canonicalize_error)
-                if canonicalize_error.kind() == std::io::ErrorKind::NotFound =>
-            {
-                let Some(parent) = candidate_home.parent() else {
-                    error = Report::msg("editor directory has no parent");
-                    continue;
+    if !file_system_policy.has_full_disk_write_access()
+        && [&logical_editor_directory, &editor_directory]
+            .into_iter()
+            .any(|directory| {
+                let Some(parent) = directory.parent() else {
+                    return true;
                 };
-                let Some(name) = candidate_home.file_name() else {
-                    error = Report::msg("editor directory has no parent");
-                    continue;
-                };
-                match dunce::canonicalize(parent) {
-                    Ok(parent) => parent.join(name),
-                    Err(canonicalize_error) => {
-                        error = canonicalize_error.into();
-                        continue;
-                    }
-                }
-            }
-            Err(canonicalize_error) => {
-                error = canonicalize_error.into();
-                continue;
-            }
-        };
-        let editor_directory = canonical_home.join("editor");
-        let logical_editor_directory = candidate_home.join("editor");
-
-        if !file_system_policy.has_full_disk_write_access()
-            && [&logical_editor_directory, &editor_directory]
-                .into_iter()
-                .any(|directory| {
-                    let Some(parent) = directory.parent() else {
-                        return true;
-                    };
-                    let is_writable = file_system_policy
-                        .can_write_local_path_with_cwd(directory, cwd)
-                        || file_system_policy.can_write_local_path_with_cwd(parent, cwd)
-                        || writable_roots.iter().any(|root| {
-                            root.is_path_writable(directory)
-                                || root.root.as_path().starts_with(directory)
-                        });
-                    #[cfg(windows)]
-                    let is_writable = is_writable
-                        || windows_temporary_roots.iter().any(|root| {
-                            directory.starts_with(root)
-                                || parent.starts_with(root)
-                                || root.starts_with(directory)
-                        });
-                    is_writable
-                })
-        {
-            error = Report::msg("editor directory must not be writable");
-            rejected_writable = true;
-            continue;
-        }
-
-        if let Err(create_error) = fs::create_dir_all(&editor_directory) {
-            error = create_error.into();
-            continue;
-        }
-        match dunce::canonicalize(&editor_directory) {
-            Ok(path) if path == editor_directory => return Ok(editor_directory),
-            Ok(_) => {
-                error = Report::msg("editor directory must not contain symbolic links");
-            }
-            Err(canonicalize_error) => {
-                error = canonicalize_error.into();
-            }
-        }
+                let is_writable = file_system_policy.can_write_local_path_with_cwd(directory, cwd)
+                    || file_system_policy.can_write_local_path_with_cwd(parent, cwd)
+                    || writable_roots.iter().any(|root| {
+                        root.is_path_writable(directory)
+                            || root.root.as_path().starts_with(directory)
+                    });
+                #[cfg(windows)]
+                let is_writable = is_writable
+                    || windows_temporary_roots.iter().any(|root| {
+                        directory.starts_with(root)
+                            || parent.starts_with(root)
+                            || root.starts_with(directory)
+                    });
+                is_writable
+            })
+    {
+        return Err(Report::msg("editor directory must not be writable"));
     }
 
-    if rejected_writable {
-        Err(Report::msg("editor directory must not be writable"))
-    } else {
-        Err(error)
+    fs::create_dir_all(&editor_directory)?;
+    if dunce::canonicalize(&editor_directory)? != editor_directory {
+        return Err(Report::msg(
+            "editor directory must not contain symbolic links",
+        ));
     }
+    Ok(editor_directory)
 }
 
 /// Write `seed` to a temp file, launch the editor command, and return the updated content.
@@ -182,16 +149,9 @@ pub(crate) async fn run_editor(
         return Err(Report::msg("editor command is empty"));
     }
 
-    let default_codex_home = dirs::home_dir().map(|home| home.join(".codex"));
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    let project_codex_home = cwd.join(".codex");
-    let mut candidate_homes = vec![codex_home];
-    if let Some(default_codex_home) = default_codex_home.as_deref() {
-        candidate_homes.push(default_codex_home);
-    }
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    candidate_homes.push(&project_codex_home);
-    let editor_directory = editor_directory(&candidate_homes, file_system_policy, cwd)?;
+    // The host owns this directory. On every platform, an unavailable or unsafe
+    // buffer directory must fail here instead of selecting another Codex home.
+    let editor_directory = editor_directory(codex_home, file_system_policy, cwd)?;
     // Convert to TempPath immediately so no file handle stays open on Windows.
     let temp_path = Builder::new()
         .suffix(".md")
