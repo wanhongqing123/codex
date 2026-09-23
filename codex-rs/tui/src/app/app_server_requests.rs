@@ -78,6 +78,7 @@ pub(super) struct PendingAppServerRequests {
     permissions_approvals: HashMap<(String, String), AppServerRequestId>,
     user_inputs: HashMap<String, VecDeque<PendingUserInputRequest>>,
     mcp_requests: HashMap<McpRequestKey, AppServerRequestId>,
+    pub(super) user_verification: super::user_verification_requests::UserVerificationRequests,
 }
 
 #[derive(Debug, Default)]
@@ -153,6 +154,16 @@ impl PendingAppServerRequests {
         self.permissions_approvals.clear();
         self.user_inputs.clear();
         self.mcp_requests.clear();
+        self.user_verification.clear();
+    }
+
+    pub(super) fn cancel_thread_verification(&mut self, thread_id: &str) {
+        for (server_name, request_id) in self.user_verification.cancel_thread(thread_id) {
+            self.mcp_requests.remove(&McpRequestKey {
+                server_name,
+                request_id,
+            });
+        }
     }
 
     pub(super) fn has_exec_approval(&self, thread_id: &str, id: &str) -> bool {
@@ -254,10 +265,7 @@ impl PendingAppServerRequests {
                     .approval_id
                     .clone()
                     .unwrap_or_else(|| params.item_id.clone());
-                let key = (
-                    Self::canonical_thread_id(&params.thread_id),
-                    approval_id.clone(),
-                );
+                let key = (Self::canonical_thread_id(&params.thread_id), approval_id);
                 self.exec.resolved.remove(&key);
                 self.exec
                     .resolved_order
@@ -312,6 +320,7 @@ impl PendingAppServerRequests {
                 None
             }
             ServerRequest::McpServerElicitationRequest { request_id, params } => {
+                self.user_verification.note_request(request_id, params);
                 self.mcp_requests.insert(
                     McpRequestKey {
                         server_name: params.server_name.clone(),
@@ -361,7 +370,43 @@ impl PendingAppServerRequests {
         T: Into<AppCommand>,
     {
         let thread_id = Self::canonical_thread_id(thread_id);
-        let op: AppCommand = op.into();
+        let op: AppCommand = match op.into() {
+            AppCommand::ResolveUserVerification {
+                server_name,
+                request_id,
+                response,
+            } => {
+                let (decision, content) = match response {
+                    crate::app_command::UserVerificationResponse::Accept { proof } => (
+                        codex_app_server_protocol::McpServerElicitationAction::Accept,
+                        Some(
+                            serde_json::to_value(proof)
+                                .map_err(|_| "Invalid verification proof".to_string())?,
+                        ),
+                    ),
+                    crate::app_command::UserVerificationResponse::Cancel => (
+                        codex_app_server_protocol::McpServerElicitationAction::Cancel,
+                        None,
+                    ),
+                };
+                AppCommand::ResolveElicitation {
+                    server_name,
+                    request_id,
+                    decision,
+                    content,
+                    meta: None,
+                }
+            }
+            op => op,
+        };
+        if let AppCommand::ResolveElicitation {
+            server_name,
+            request_id,
+            ..
+        } = &op
+        {
+            self.user_verification.remove(server_name, request_id);
+        }
         let resolution = match &op {
             // Removing the request id is the single compare-and-set point for every decision
             // source (local TUI, explicit Remote IM approval, or automatic Remote IM decline).
@@ -510,6 +555,8 @@ impl PendingAppServerRequests {
             .find_map(|(key, value)| (value == request_id).then(|| key.clone()))
         {
             self.mcp_requests.remove(&key);
+            self.user_verification
+                .remove(&key.server_name, &key.request_id);
             return Some(ResolvedAppServerRequest::McpElicitation {
                 server_name: key.server_name,
                 request_id: key.request_id,
@@ -659,7 +706,6 @@ mod tests {
     fn approval_registry_stays_heap_backed_in_the_main_app_state() {
         let registry_size = std::mem::size_of::<PendingAppServerRequests>();
         let app_size = std::mem::size_of::<crate::app::App>();
-        println!("PendingAppServerRequests={registry_size} App={app_size}");
         assert!(
             registry_size <= 256,
             "approval registry grew inline: {registry_size}"
@@ -956,7 +1002,7 @@ mod tests {
                     item_id: "perm-1".to_string(),
                     environment_id: None,
                     started_at_ms: 0,
-                    cwd,
+                    cwd: cwd.into(),
                     reason: None,
                     permissions,
                 },
@@ -996,7 +1042,7 @@ mod tests {
                     item_id: "perm-1".to_string(),
                     environment_id: None,
                     started_at_ms: 0,
-                    cwd: absolute_path(if cfg!(windows) { r"C:\tmp" } else { "/tmp" }),
+                    cwd: absolute_path(if cfg!(windows) { r"C:\tmp" } else { "/tmp" }).into(),
                     reason: None,
                     permissions: serde_json::from_value(json!({
                         "network": { "enabled": null }

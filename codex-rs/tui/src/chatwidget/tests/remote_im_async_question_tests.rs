@@ -204,7 +204,7 @@ async fn remote_im_all_answers_are_ordinary_messages_and_idle_does_not_stop_forw
         /*duration_ms*/ None,
         /*error*/ None,
     );
-    turn.items = vec![first.clone(), last.clone()];
+    turn.items = vec![first, last];
     chat.handle_server_notification(
         ServerNotification::TurnCompleted(TurnCompletedNotification {
             thread_id: "thread-1".to_string(),

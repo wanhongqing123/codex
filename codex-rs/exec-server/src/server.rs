@@ -1,3 +1,4 @@
+mod build_identity;
 mod file_system_handler;
 mod handler;
 mod process_handler;
@@ -7,6 +8,10 @@ mod release_version;
 mod request_dispatcher;
 mod session_registry;
 mod transport;
+
+#[cfg(all(test, unix))]
+#[path = "server/process_otel_tests.rs"]
+mod process_otel_tests;
 
 pub(crate) use handler::ExecServerHandler;
 pub(crate) use processor::ConnectionProcessor;
@@ -46,6 +51,7 @@ pub async fn run_main_with_telemetry(
     http_client_factory: HttpClientFactory,
     request_dispatch_mode: RequestDispatchMode,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    std::sync::LazyLock::force(&build_identity::PROVIDER_ID);
     transport::run_transport(
         listen_url,
         runtime_paths,

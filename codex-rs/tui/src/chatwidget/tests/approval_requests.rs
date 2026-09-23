@@ -336,7 +336,7 @@ fn app_server_request_permissions_preserves_file_system_permissions() {
         item_id: "item-1".to_string(),
         environment_id: Some("remote".to_string()),
         started_at_ms: 0,
-        cwd: cwd.clone(),
+        cwd: cwd.clone().into(),
         reason: Some("Select a workspace root".to_string()),
         permissions: codex_app_server_protocol::RequestPermissionProfile {
             network: Some(AppServerAdditionalNetworkPermissions {
@@ -364,7 +364,7 @@ fn app_server_request_permissions_preserves_file_system_permissions() {
             )),
         }
     );
-    assert_eq!(request.cwd, Some(cwd));
+    assert_eq!(request.cwd, Some(cwd.into()));
     assert_eq!(request.environment_id.as_deref(), Some("remote"));
 }
 
@@ -428,11 +428,13 @@ async fn remote_im_exec_approval_requires_task_identity_and_validates_decision()
                 command: vec!["Remove-Item".into(), "-Force".into()],
             },
         };
-    let display = |message: &str| UserMessageDisplay {
-        message: message.to_string(),
-        remote_image_urls: Vec::new(),
-        local_images: Vec::new(),
-        text_elements: Vec::new(),
+    let display = |message: &str| {
+        ChatWidget::user_message_display_from_inputs(&[
+            codex_app_server_protocol::UserInput::Text {
+                text: message.to_string(),
+                text_elements: Vec::new(),
+            },
+        ])
     };
     chat.remote_im_pending_replies
         .push_back(PendingRemoteImReply {

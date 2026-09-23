@@ -1,6 +1,7 @@
 use clap::Args;
 use clap::FromArgMatches;
 use clap::Parser;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_cli::ApprovalModeCliArg;
 use codex_utils_cli::CliConfigOverrides;
 use codex_utils_cli::SharedCliOptions;
@@ -8,6 +9,10 @@ use codex_utils_cli::SharedCliOptions;
 #[derive(Parser, Clone, Debug)]
 #[command(version)]
 pub struct Cli {
+    /// Internal: launching CLI that handles daemon updates after the TUI exits.
+    #[clap(skip)]
+    pub daemon_cli_executable: Option<AbsolutePathBuf>,
+
     /// Optional user prompt to start the session.
     #[arg(value_name = "PROMPT", value_hint = clap::ValueHint::Other)]
     pub prompt: Option<String>,
@@ -78,6 +83,9 @@ pub struct Cli {
     /// Internal: Multi-AI Code IM structured output bridge endpoint.
     #[arg(long = "multi-ai-code-im-ipc", hide = true)]
     pub multi_ai_code_im_ipc: Option<String>,
+    /// Run without the shared background server, even if it is already running.
+    #[arg(long)]
+    pub no_daemon: bool,
 
     #[clap(skip)]
     pub config_overrides: CliConfigOverrides,
