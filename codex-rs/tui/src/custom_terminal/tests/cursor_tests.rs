@@ -284,3 +284,47 @@ fn native_cursor_mode_changes_style_without_repainting_the_anchor() {
         "native mode repainted an unchanged glyph: {output:?}"
     );
 }
+
+#[test]
+fn native_cursor_mode_keeps_the_cursor_visible_during_frame_updates() {
+    let mut terminal = Terminal::with_cursor_repair_mode(
+        CaptureBackend::new(/*width*/ 12, /*height*/ 2),
+        CursorRepairMode::Native,
+    )
+    .expect("terminal");
+    terminal.set_viewport_area(Rect::new(
+        /*x*/ 0, /*y*/ 0, /*width*/ 12, /*height*/ 2,
+    ));
+
+    terminal
+        .draw(|frame| {
+            frame
+                .buffer_mut()
+                .set_string(0, 0, "first", Style::default());
+            frame.set_cursor_position((4, 1));
+        })
+        .expect("first draw");
+    terminal.backend_mut().output.clear();
+    terminal
+        .draw(|frame| {
+            frame
+                .buffer_mut()
+                .set_string(0, 0, "second", Style::default());
+            frame.set_cursor_position((4, 1));
+        })
+        .expect("second draw");
+
+    let output = terminal.backend().output();
+    assert!(
+        output.contains("second"),
+        "frame update was not sent: {output:?}"
+    );
+    assert!(
+        !output.contains("\x1b[?25l"),
+        "native mode hid the cursor during an ordinary frame update: {output:?}"
+    );
+    assert!(
+        !output.contains("\x1b[?25h"),
+        "native mode showed the cursor again after an ordinary frame update: {output:?}"
+    );
+}
