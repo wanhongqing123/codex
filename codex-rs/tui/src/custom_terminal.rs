@@ -474,15 +474,10 @@ where
         let cursor_position = frame.cursor_position;
         let cursor_style = frame.cursor_style;
 
-        // JediTerm repair moves to an anchor while repainting the glyph under DECSCUSR, so hide
-        // that intermediate cursor. Native terminals only receive the ordinary frame diff and
-        // final cursor position; hiding and showing around every streamed frame visibly flickers
-        // under Windows ConPTY and embedded xterm.js.
+        // Not every terminal or multiplexer hides intermediate cursor moves inside a
+        // synchronized update, especially when the frame spans multiple writes.
         let updates = diff_buffers(self.previous_buffer(), self.current_buffer());
-        if self.cursor_repair_mode == CursorRepairMode::JediTerm
-            && !updates.is_empty()
-            && !self.hidden_cursor
-        {
+        if !updates.is_empty() && !self.hidden_cursor {
             self.hide_cursor()?;
         }
         self.flush_updates(updates)?;
