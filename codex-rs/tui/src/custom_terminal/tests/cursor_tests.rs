@@ -284,3 +284,73 @@ fn native_cursor_mode_changes_style_without_repainting_the_anchor() {
         "native mode repainted an unchanged glyph: {output:?}"
     );
 }
+
+#[test]
+fn native_cursor_mode_restores_visibility_after_viewport_change() {
+    let mut terminal = Terminal::with_cursor_repair_mode(
+        CaptureBackend::new(/*width*/ 12, /*height*/ 2),
+        CursorRepairMode::Native,
+    )
+    .expect("terminal");
+    terminal.set_viewport_area(Rect::new(0, 0, 12, 2));
+    terminal.hide_cursor().expect("hide cursor");
+
+    let mut parser =
+        vt100::Parser::new(/*rows*/ 2, /*cols*/ 12, /*scrollback_len*/ 0);
+    parser.process(terminal.backend().output().as_bytes());
+    assert!(parser.screen().hide_cursor());
+
+    terminal.backend_mut().output.clear();
+    terminal.set_viewport_area(Rect::new(0, 0, 11, 2));
+    terminal
+        .draw(|frame| {
+            frame
+                .buffer_mut()
+                .set_string(0, 0, "anchor", Style::default());
+            frame.set_cursor_position((4, 1));
+        })
+        .expect("draw after viewport change");
+
+    parser.process(terminal.backend().output().as_bytes());
+    assert!(
+        !parser.screen().hide_cursor(),
+        "redrawing the composer must restore its visible cursor"
+    );
+}
+
+#[test]
+fn native_cursor_mode_does_not_hide_and_show_on_every_frame_update() {
+    let mut terminal = Terminal::with_cursor_repair_mode(
+        CaptureBackend::new(/*width*/ 12, /*height*/ 2),
+        CursorRepairMode::Native,
+    )
+    .expect("terminal");
+    terminal.set_viewport_area(Rect::new(0, 0, 12, 2));
+    terminal
+        .draw(|frame| {
+            frame
+                .buffer_mut()
+                .set_string(0, 0, "first", Style::default());
+            frame.set_cursor_position((4, 1));
+        })
+        .expect("first draw");
+    terminal.backend_mut().output.clear();
+    terminal
+        .draw(|frame| {
+            frame
+                .buffer_mut()
+                .set_string(0, 0, "second", Style::default());
+            frame.set_cursor_position((4, 1));
+        })
+        .expect("second draw");
+
+    let output = terminal.backend().output();
+    assert!(
+        output.contains("second"),
+        "frame update was not sent: {output:?}"
+    );
+    assert!(
+        !output.contains("\x1b[?25l") && !output.contains("\x1b[?25h"),
+        "ordinary native redraw toggled cursor visibility: {output:?}"
+    );
+}

@@ -161,6 +161,8 @@ where
     current: usize,
     /// Whether the cursor is currently hidden
     pub hidden_cursor: bool,
+    /// A screen or viewport change may have invalidated the backend's cursor visibility.
+    cursor_visibility_unknown: bool,
     /// Last cursor style sent successfully, so ordinary redraws do not repaint its repair anchor.
     last_cursor_style: Option<SetCursorStyle>,
     cursor_repair_mode: CursorRepairMode,
@@ -189,7 +191,7 @@ where
             eprintln!("Failed to reset the cursor style: {err}");
         }
 
-        if self.hidden_cursor
+        if (self.hidden_cursor || self.cursor_visibility_unknown)
             && let Err(err) = self.show_cursor()
         {
             eprintln!("Failed to show the cursor: {err}");
@@ -254,6 +256,7 @@ where
             buffers: [Buffer::empty(Rect::ZERO), Buffer::empty(Rect::ZERO)],
             current: 0,
             hidden_cursor: false,
+            cursor_visibility_unknown: false,
             last_cursor_style: None,
             cursor_repair_mode,
             viewport_area: Rect::new(
@@ -474,21 +477,24 @@ where
         let cursor_position = frame.cursor_position;
         let cursor_style = frame.cursor_style;
 
-        // Not every terminal or multiplexer hides intermediate cursor moves inside a
-        // synchronized update, especially when the frame spans multiple writes.
+        // JediTerm needs the intermediate cursor hidden while repainting its style anchor.
+        // Native terminals keep it visible during ordinary streamed frames to avoid flicker.
         let updates = diff_buffers(self.previous_buffer(), self.current_buffer());
-        if !updates.is_empty() && !self.hidden_cursor {
+        if self.cursor_repair_mode == CursorRepairMode::JediTerm
+            && !updates.is_empty()
+            && !self.hidden_cursor
+        {
             self.hide_cursor()?;
         }
         self.flush_updates(updates)?;
 
         match cursor_position {
-            None if !self.hidden_cursor => self.hide_cursor()?,
+            None if !self.hidden_cursor || self.cursor_visibility_unknown => self.hide_cursor()?,
             None => {}
             Some(position) => {
                 self.set_cursor_style_with_repair(cursor_style)?;
                 self.set_cursor_position(position)?;
-                if self.hidden_cursor {
+                if self.hidden_cursor || self.cursor_visibility_unknown {
                     self.show_cursor()?;
                 }
             }
@@ -505,6 +511,7 @@ where
     pub fn hide_cursor(&mut self) -> io::Result<()> {
         self.backend.hide_cursor()?;
         self.hidden_cursor = true;
+        self.cursor_visibility_unknown = false;
         Ok(())
     }
 
@@ -512,6 +519,7 @@ where
     pub fn show_cursor(&mut self) -> io::Result<()> {
         self.backend.show_cursor()?;
         self.hidden_cursor = false;
+        self.cursor_visibility_unknown = false;
         Ok(())
     }
 
