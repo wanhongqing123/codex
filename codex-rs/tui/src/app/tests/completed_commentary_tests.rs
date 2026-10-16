@@ -36,6 +36,7 @@ async fn authoritative_commentary_survives_empty_stream_and_keeps_surrounding_hi
                 AppEvent::ConsolidateAgentMessage {
                     message_id,
                     source,
+                    copy_source,
                     cwd,
                     inline_visualization_context,
                     scrollback_reflow,
@@ -43,9 +44,12 @@ async fn authoritative_commentary_survives_empty_stream_and_keeps_surrounding_hi
                 } => app.handle_consolidate_agent_message(
                     &mut tui,
                     message_id,
-                    source,
-                    cwd,
-                    inline_visualization_context,
+                    history_cell::AgentMarkdownCell::new_with_inline_visualizations(
+                        source,
+                        &cwd,
+                        inline_visualization_context,
+                    )
+                    .with_copy_source(copy_source),
                     scrollback_reflow,
                     deferred_history_cell,
                 )?,

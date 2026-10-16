@@ -1,4 +1,9 @@
-//! Exercises real local storage through independent handles and host capabilities.
+//! Exercises message-board backends through their shared trait and host capabilities.
+
+#![expect(
+    clippy::unwrap_used,
+    reason = "shared test helpers assert successful operations"
+)]
 
 use std::collections::HashMap;
 use std::num::NonZeroU32;
@@ -80,6 +85,67 @@ impl MessageBoardHost for Host {
             Ok(NotificationDelivery::Accepted)
         })
     }
+}
+
+#[tokio::test]
+async fn opening_board_preserves_posts_when_corruption_has_no_startup_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let sqlite = SqliteConfig::new_for_testing(dir.path().to_path_buf().try_into().unwrap());
+    let root = ThreadId::new();
+    let host = Arc::new(Host {
+        clock: AtomicI64::default(),
+        agent_path_calls: AtomicUsize::default(),
+        members: [(root, AgentPath::root())].into(),
+        fail_notifications: AtomicBool::new(false),
+        active: AtomicBool::new(true),
+        notifications: Mutex::default(),
+    });
+    let path = dir.path().join("agent_message_board_1.sqlite");
+    // Keep the validated fixture alive and copy it to a new file identity so the
+    // board's first open still checks the corruption.
+    let fixture = path.with_extension("fixture");
+    let pool = sqlite.open_read_write_pool(&fixture).await.unwrap();
+    sqlx::raw_sql(
+        "CREATE TABLE unrelated(value INTEGER);
+         INSERT INTO unrelated VALUES (NULL);
+         PRAGMA writable_schema=ON;
+         UPDATE sqlite_schema SET sql='CREATE TABLE unrelated(value INTEGER NOT NULL)' WHERE name='unrelated';
+         PRAGMA writable_schema=OFF;",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+    tokio::fs::copy(&fixture, &path).await.unwrap();
+    let pool = sqlite
+        .open_read_only_pool(&path, /*busy_timeout*/ None)
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("PRAGMA quick_check(1)")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "NULL value in unrelated.value"
+    );
+    pool.close().await;
+
+    let tree = SessionId::from(root);
+    let board = LocalAgentMessageBoard::open(&sqlite, tree, host.clone())
+        .await
+        .unwrap();
+    let request = PostRequest {
+        request_id: "preserved-post".into(),
+        destination: PostDestination::NewChannel("proofs".into()),
+        text: "Preserve this post.".into(),
+        agents_to_notify: Vec::new(),
+    };
+    let metadata = board.post(root, request.clone()).await.unwrap();
+    drop(board);
+    let resumed = LocalAgentMessageBoard::open(&sqlite, tree, host)
+        .await
+        .unwrap();
+    assert_eq!(resumed.post(root, request).await.unwrap(), metadata);
 }
 
 #[tokio::test]
@@ -384,7 +450,91 @@ async fn shared_handles_resume_posts_and_preserve_subscription_rules() {
 }
 
 #[tokio::test]
+async fn in_memory_handles_share_posts_deduplicate_calls_and_release_state() {
+    let root = ThreadId::new();
+    let child = ThreadId::new();
+    let child_path = AgentPath::root().join("worker").unwrap();
+    let host = Arc::new(Host {
+        clock: AtomicI64::default(),
+        agent_path_calls: AtomicUsize::default(),
+        members: [(root, AgentPath::root()), (child, child_path.clone())].into(),
+        active: AtomicBool::new(true),
+        fail_notifications: AtomicBool::new(false),
+        notifications: Mutex::default(),
+    });
+    let boards = InMemoryMessageBoards::default();
+    let (board, shared) = tokio::join!(
+        boards.open(root.into(), host.clone()),
+        boards.open(root.into(), host.clone()),
+    );
+    let request = PostRequest {
+        request_id: "same-call".into(),
+        destination: PostDestination::NewChannel("work".into()),
+        text: "done".into(),
+        agents_to_notify: vec![child_path],
+    };
+    let (first, retry) = tokio::join!(
+        board.post(root, request.clone()),
+        shared.post(root, request)
+    );
+    let metadata = first.unwrap();
+    assert_eq!(retry.unwrap(), metadata);
+    assert_eq!(
+        *host.notifications.lock().unwrap(),
+        vec![(child, metadata.clone())]
+    );
+    let read = ReadPostRequest {
+        message_id: metadata.message_id,
+        offset_chars: 0,
+        limit_chars: NonZeroU32::new(20).unwrap(),
+    };
+    assert_eq!(
+        shared.read_post(child, read.clone()).await.unwrap(),
+        PostContent {
+            metadata,
+            text: "done".into(),
+            n_chars: 4,
+            next_offset_chars: 4
+        }
+    );
+    let other = boards.open(SessionId::new(), host.clone()).await;
+    assert!(other.read_post(root, read.clone()).await.is_err());
+    drop(board);
+    drop(shared);
+    let fresh = boards.open(root.into(), host).await;
+    assert!(fresh.read_post(root, read).await.is_err());
+}
+
+enum Backend {
+    Local,
+    InMemory,
+}
+
+impl Backend {
+    async fn open(
+        self,
+        sqlite: &SqliteConfig,
+        identity: SessionId,
+        host: Arc<dyn MessageBoardHost>,
+    ) -> Arc<dyn AgentMessageBoard> {
+        match self {
+            Self::Local => Arc::new(
+                LocalAgentMessageBoard::open(sqlite, identity, host)
+                    .await
+                    .unwrap(),
+            ),
+            Self::InMemory => Arc::new(InMemoryAgentMessageBoard::new(identity, host)),
+        }
+    }
+}
+
+#[tokio::test]
 async fn failed_requests_do_not_create_channels_or_notify_inactive_agents() {
+    check_failed_requests_do_not_create_channels_or_notify_inactive_agents(Backend::Local).await;
+    check_failed_requests_do_not_create_channels_or_notify_inactive_agents(Backend::InMemory).await;
+}
+
+async fn check_failed_requests_do_not_create_channels_or_notify_inactive_agents(backend: Backend) {
     let dir = tempfile::tempdir().unwrap();
     let sqlite = SqliteConfig::new_for_testing(dir.path().to_path_buf().try_into().unwrap());
     let root = ThreadId::new();
@@ -398,9 +548,9 @@ async fn failed_requests_do_not_create_channels_or_notify_inactive_agents() {
         active: AtomicBool::new(false),
         notifications: Mutex::default(),
     });
-    let board = LocalAgentMessageBoard::open(&sqlite, SessionId::from(root), host.clone())
-        .await
-        .unwrap();
+    let board = backend
+        .open(&sqlite, SessionId::from(root), host.clone())
+        .await;
     let mut request = PostRequest {
         request_id: "post".into(),
         destination: PostDestination::NewChannel("work".into()),
@@ -452,6 +602,11 @@ async fn failed_requests_do_not_create_channels_or_notify_inactive_agents() {
 
 #[tokio::test]
 async fn queries_enforce_page_and_preview_caps() {
+    check_queries_enforce_page_and_preview_caps(Backend::Local).await;
+    check_queries_enforce_page_and_preview_caps(Backend::InMemory).await;
+}
+
+async fn check_queries_enforce_page_and_preview_caps(backend: Backend) {
     let dir = tempfile::tempdir().unwrap();
     let sqlite = SqliteConfig::new_for_testing(dir.path().to_path_buf().try_into().unwrap());
     let root = ThreadId::new();
@@ -463,14 +618,13 @@ async fn queries_enforce_page_and_preview_caps() {
         active: AtomicBool::new(false),
         notifications: Mutex::default(),
     });
-    let board = LocalAgentMessageBoard::open(&sqlite, root.into(), host)
-        .await
-        .unwrap();
+    let board = backend.open(&sqlite, root.into(), host).await;
     board
         .create_channel(
             root,
             CreateChannelRequest {
                 channel_name: "Straße".into(),
+                description: None,
                 subscription: SubscriptionChange::Unsubscribe,
             },
         )
@@ -502,7 +656,8 @@ async fn queries_enforce_page_and_preview_caps() {
         )
         .await
         .unwrap();
-    assert_eq!(channels.results.len(), 1);
+    assert_eq!(channels.channels.results.len(), 1);
+    assert_eq!(channels.channels.results[0].description, None);
     let query = PostQuery {
         channel_name: None,
         query: Some("STRASSE".into()),
@@ -543,6 +698,11 @@ async fn queries_enforce_page_and_preview_caps() {
 
 #[tokio::test]
 async fn queries_page_discussions_and_search_unicode() {
+    check_queries_page_discussions_and_search_unicode(Backend::Local).await;
+    check_queries_page_discussions_and_search_unicode(Backend::InMemory).await;
+}
+
+async fn check_queries_page_discussions_and_search_unicode(backend: Backend) {
     let dir = tempfile::tempdir().unwrap();
     let sqlite = SqliteConfig::new_for_testing(dir.path().to_path_buf().try_into().unwrap());
     let root = ThreadId::new();
@@ -554,11 +714,7 @@ async fn queries_page_discussions_and_search_unicode() {
         active: AtomicBool::new(true),
         notifications: Mutex::default(),
     });
-    let board: Arc<dyn AgentMessageBoard> = Arc::new(
-        LocalAgentMessageBoard::open(&sqlite, SessionId::from(root), host)
-            .await
-            .unwrap(),
-    );
+    let board = backend.open(&sqlite, SessionId::from(root), host).await;
     let request = PostRequest {
         request_id: "first".into(),
         destination: PostDestination::NewChannel("work".into()),
@@ -749,8 +905,11 @@ async fn queries_page_discussions_and_search_unicode() {
         )
         .await
         .unwrap();
-    assert_eq!(channels.results[0].message_count, 3);
-    assert_eq!(channels.results[0].last_message_id, Some(reply.message_id));
+    assert_eq!(channels.channels.results[0].message_count, 3);
+    assert_eq!(
+        channels.channels.results[0].last_message_id,
+        Some(reply.message_id)
+    );
     assert!(
         board
             .read_thread(
@@ -799,6 +958,14 @@ fn board_tool_call(name: &str, args: serde_json::Value) -> codex_tools::ToolCall
 
 #[tokio::test]
 async fn tools_cover_channel_discussions_subscriptions_and_escaped_previews() {
+    check_tools_cover_channel_discussions_subscriptions_and_escaped_previews(Backend::Local).await;
+    check_tools_cover_channel_discussions_subscriptions_and_escaped_previews(Backend::InMemory)
+        .await;
+}
+
+async fn check_tools_cover_channel_discussions_subscriptions_and_escaped_previews(
+    backend: Backend,
+) {
     use codex_tools::ToolName;
     use serde_json::json;
     let dir = tempfile::tempdir().unwrap();
@@ -814,11 +981,7 @@ async fn tools_cover_channel_discussions_subscriptions_and_escaped_previews() {
         active: AtomicBool::new(true),
         notifications: Mutex::default(),
     });
-    let board = Arc::new(
-        LocalAgentMessageBoard::open(&sqlite, root.into(), host.clone())
-            .await
-            .unwrap(),
-    );
+    let board = backend.open(&sqlite, root.into(), host.clone()).await;
     let tools = message_board_tools(
         board,
         root,
@@ -835,11 +998,23 @@ async fn tools_cover_channel_discussions_subscriptions_and_escaped_previews() {
     let created = tool("create_channel")
         .handle(board_tool_call(
             "create_channel",
-            json!({"channel_name":"Workflow"}),
+            json!({"channel_name":"Workflow", "description":"é".repeat(256)}),
         ))
         .await
         .unwrap();
     let created: ChannelSummary = serde_json::from_str(&created.log_output()).unwrap();
+    assert_eq!(
+        created,
+        ChannelSummary {
+            channel_name: "Workflow".into(),
+            description: Some("é".repeat(256)),
+            permissions: None,
+            created_at: "2026-09-18T12:00:00Z".parse().unwrap(),
+            created_by: AgentPath::root(),
+            message_count: 0,
+            last_message_id: None,
+        }
+    );
     let channels = tool("get_channels")
         .handle(board_tool_call("get_channels", json!({"query":"WORK"})))
         .await
@@ -985,6 +1160,15 @@ async fn tools_cover_channel_discussions_subscriptions_and_escaped_previews() {
 
 #[tokio::test]
 async fn tools_validate_arguments_deduplicate_calls_and_bound_unicode_results() {
+    check_tools_validate_arguments_deduplicate_calls_and_bound_unicode_results(Backend::Local)
+        .await;
+    check_tools_validate_arguments_deduplicate_calls_and_bound_unicode_results(Backend::InMemory)
+        .await;
+}
+
+async fn check_tools_validate_arguments_deduplicate_calls_and_bound_unicode_results(
+    backend: Backend,
+) {
     use codex_tools::ToolCallSource;
     use codex_tools::ToolName;
     use codex_utils_output_truncation::TruncationPolicy;
@@ -1003,11 +1187,7 @@ async fn tools_validate_arguments_deduplicate_calls_and_bound_unicode_results() 
         active: AtomicBool::new(true),
         notifications: Mutex::default(),
     });
-    let board = Arc::new(
-        LocalAgentMessageBoard::open(&sqlite, root.into(), host.clone())
-            .await
-            .unwrap(),
-    );
+    let board = backend.open(&sqlite, root.into(), host.clone()).await;
     let tools = message_board_tools(
         board.clone(),
         root,
@@ -1033,6 +1213,22 @@ async fn tools_validate_arguments_deduplicate_calls_and_bound_unicode_results() 
         limited.truncation_policy = TruncationPolicy::Bytes(1);
         assert!(tool(name).handle(limited).await.is_err());
     }
+    assert!(
+        tool("create_channel")
+            .handle(call(
+                "create_channel",
+                json!({"channel_name":"too-long", "description":"é".repeat(257)}),
+            ))
+            .await
+            .is_err()
+    );
+    // Escaped descriptions must fit before creation, rather than failing after commit.
+    let mut small_budget = call(
+        "create_channel",
+        json!({"channel_name":"too-small-budget", "description":"\u{1}".repeat(512)}),
+    );
+    small_budget.truncation_policy = TruncationPolicy::Bytes(4096);
+    assert!(tool("create_channel").handle(small_budget).await.is_err());
     assert!(
         tool("post")
             .handle(call(
@@ -1066,6 +1262,7 @@ async fn tools_validate_arguments_deduplicate_calls_and_bound_unicode_results() 
             )
             .await
             .unwrap()
+            .channels
             .results
             .is_empty()
     );
@@ -1193,4 +1390,180 @@ async fn tools_validate_arguments_deduplicate_calls_and_bound_unicode_results() 
             .len()
             <= 8000
     );
+}
+
+#[test]
+fn channel_descriptions_validate_construction_and_serialization() {
+    use serde_json::json;
+
+    let description = "é".repeat(256);
+    let request_json = json!({
+        "channel_name": "design",
+        "description": description,
+        "subscription": "Unsubscribe",
+    });
+    let request: CreateChannelRequest = serde_json::from_value(request_json.clone()).unwrap();
+    assert_eq!(
+        request.description,
+        Some(ChannelDescription::try_from(description).unwrap())
+    );
+    assert_eq!(serde_json::to_value(request).unwrap(), request_json);
+
+    let too_long = "é".repeat(257);
+    assert!(ChannelDescription::try_from(too_long.clone()).is_err());
+    assert!(
+        serde_json::from_value::<CreateChannelRequest>(json!({
+            "channel_name": "too-long",
+            "description": too_long,
+            "subscription": "Unsubscribe",
+        }))
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn channel_descriptions_migrate_legacy_storage_and_survive_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let sqlite = SqliteConfig::new_for_testing(dir.path().to_path_buf().try_into().unwrap());
+    let root = ThreadId::new();
+    let host = Arc::new(Host {
+        clock: AtomicI64::default(),
+        agent_path_calls: AtomicUsize::default(),
+        members: [(root, AgentPath::root())].into(),
+        active: AtomicBool::new(true),
+        fail_notifications: AtomicBool::new(false),
+        notifications: Mutex::default(),
+    });
+    let pool = sqlite
+        .open_read_write_pool(&dir.path().join("agent_message_board_1.sqlite"))
+        .await
+        .unwrap();
+    sqlx::query("CREATE TABLE channels (board TEXT NOT NULL, name TEXT NOT NULL, name_search TEXT NOT NULL, created_at TEXT NOT NULL, timestamp INTEGER NOT NULL, author TEXT NOT NULL, PRIMARY KEY(board,name))").execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO channels VALUES (?, 'legacy', 'legacy', '2026-09-17T12:00:00Z', 0, '/root')",
+    )
+    .bind(root.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+    let board = LocalAgentMessageBoard::open(&sqlite, root.into(), host.clone())
+        .await
+        .unwrap();
+    let legacy = ChannelSummary {
+        channel_name: "legacy".into(),
+        description: None,
+        permissions: None,
+        created_at: "2026-09-17T12:00:00Z".parse().unwrap(),
+        created_by: AgentPath::root(),
+        message_count: 0,
+        last_message_id: None,
+    };
+    let created = board
+        .create_channel(
+            root,
+            CreateChannelRequest {
+                channel_name: "design".into(),
+                description: Some(
+                    "Design decisions and tradeoffs."
+                        .to_string()
+                        .try_into()
+                        .unwrap(),
+                ),
+                subscription: SubscriptionChange::Unsubscribe,
+            },
+        )
+        .await
+        .unwrap();
+    drop(board);
+    let reopened = LocalAgentMessageBoard::open(&sqlite, root.into(), host)
+        .await
+        .unwrap();
+    let listed = reopened
+        .list_channels(
+            root,
+            ChannelQuery {
+                query: None,
+                direction: SortDirection::NewestFirst,
+                page: PageRequest::default(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        listed.channels,
+        Page {
+            results: vec![created, legacy],
+            next_cursor: None
+        }
+    );
+}
+
+#[tokio::test]
+async fn local_board_setup_survives_reopen() -> Result<()> {
+    use serde_json::json;
+    let dir = tempfile::tempdir()?;
+    let sqlite = SqliteConfig::new_for_testing(dir.path().to_path_buf().try_into().unwrap());
+    let root = ThreadId::new();
+    let host = Arc::new(Host {
+        clock: AtomicI64::default(),
+        agent_path_calls: AtomicUsize::default(),
+        members: [(root, AgentPath::root())].into(),
+        active: AtomicBool::new(true),
+        fail_notifications: AtomicBool::new(false),
+        notifications: Mutex::default(),
+    });
+    let setup = json!({"timestamp":"2026-09-18T12:00:00Z","template":{"version":1,"channels":{"policy":{"description":"Shared policies"}}}});
+    configure_local_board(&sqlite, root.into(), serde_json::from_value(setup.clone())?).await?;
+    configure_local_board(&sqlite, root.into(), serde_json::from_value(setup.clone())?).await?;
+    let board = LocalAgentMessageBoard::open(&sqlite, root.into(), host.clone()).await?;
+    drop(board);
+    let board = LocalAgentMessageBoard::open(&sqlite, root.into(), host.clone()).await?;
+    let query = ChannelQuery {
+        query: None,
+        direction: SortDirection::NewestFirst,
+        page: PageRequest::default(),
+    };
+    let channels = board.list_channels(root, query.clone()).await?;
+    assert_eq!(
+        serde_json::to_value(channels)?,
+        json!({"results":[{
+        "channel_name":"policy", "description":"Shared policies", "created_at":"2026-09-18T12:00:00Z",
+        "created_by":"/root", "message_count":0, "last_message_id":null
+    }],"n_returned":1,"has_more":false,"next_cursor":null})
+    );
+    let mut changed = setup.clone();
+    changed["template"]["channels"]["policy"]["description"] = json!("Changed");
+    assert!(
+        configure_local_board(&sqlite, root.into(), serde_json::from_value(changed)?)
+            .await
+            .is_err()
+    );
+    board
+        .create_channel(
+            root,
+            CreateChannelRequest {
+                channel_name: "new".into(),
+                description: None,
+                subscription: SubscriptionChange::Unsubscribe,
+            },
+        )
+        .await?;
+    configure_local_board(&sqlite, root.into(), serde_json::from_value(setup.clone())?).await?;
+    assert_eq!(
+        board
+            .list_channels(root, query)
+            .await?
+            .channels
+            .results
+            .len(),
+        2
+    );
+    LocalAgentMessageBoard::delete_boards(&sqlite, &[root.into()]).await?;
+    assert!(
+        configure_local_board(&sqlite, root.into(), serde_json::from_value(setup)?)
+            .await
+            .is_err()
+    );
+    Ok(())
 }

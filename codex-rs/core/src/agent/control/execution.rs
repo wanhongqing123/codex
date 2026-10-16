@@ -3,7 +3,7 @@
 
 use super::LocalAgentControl;
 use crate::agent::types::AgentExecutionGuard;
-use crate::codex_thread::CodexThread;
+use codex_protocol::error::AgentErrorContext;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
@@ -31,20 +31,6 @@ impl Drop for LocalExecutionPermit {
 }
 
 impl LocalAgentControl {
-    pub(crate) async fn ensure_execution_capacity_for_turn_start(
-        &self,
-        thread: &CodexThread,
-    ) -> CodexResult<()> {
-        if thread.session.active_turn.lock().await.is_some() {
-            return Ok(());
-        }
-        let config = thread.session.get_config().await;
-        let multi_agent_version = thread
-            .multi_agent_version()
-            .unwrap_or_else(|| config.multi_agent_version_from_features());
-        self.ensure_execution_capacity(multi_agent_version, &thread.session_source)
-    }
-
     pub(crate) fn ensure_execution_capacity(
         &self,
         multi_agent_version: MultiAgentVersion,
@@ -57,9 +43,10 @@ impl LocalAgentControl {
         if self.runtime.agent_execution_limiter.has_capacity() {
             Ok(())
         } else {
-            Err(CodexErr::new(CodexErrorDetails::AgentLimitReached {
-                max_threads,
-            }))
+            Err(
+                CodexErr::new(CodexErrorDetails::AgentLimitReached { max_threads })
+                    .with_agent_context(AgentErrorContext::ExecutionCapacity),
+            )
         }
     }
 

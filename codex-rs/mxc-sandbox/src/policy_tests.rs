@@ -82,6 +82,58 @@ fn symbolic_root_precedence_is_independent_of_drive_and_cwd() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn approved_command_expands_volume_roots_without_retaining_original_grants() -> Result<()> {
+    use FileSystemAccessMode::Deny;
+    use FileSystemAccessMode::Read;
+    use FileSystemAccessMode::Write;
+
+    let volumes = [
+        PathUri::parse("file:///C:/")?,
+        PathUri::parse("file:///D:/")?,
+    ];
+    let cwd = volumes[0].join("work")?;
+    let secret = volumes[0].join("private")?;
+    let formerly_readonly = volumes[1].join("scoped")?;
+    let reopened = secret.join("reopened")?;
+    let root_git = volumes[0].join(".git")?;
+    let denied_root_metadata = volumes[0].join(".agents")?;
+    let workspace_git = cwd.join(".git/FETCH_HEAD")?;
+    let context = FileSystemSandboxPolicyContext {
+        cwd: &cwd,
+        workspace_roots: std::slice::from_ref(&cwd),
+        user_home_dir: None,
+        temporary_directories: Some(&[]),
+    };
+    let mut policy = FileSystemSandboxPolicy::read_only();
+    policy.entries.extend([
+        FileSystemSandboxEntry::new(secret.clone().into(), Deny),
+        FileSystemSandboxEntry::new(denied_root_metadata.clone().into(), Deny),
+        FileSystemSandboxEntry::new(reopened.clone().into(), Write),
+        FileSystemSandboxEntry::new(formerly_readonly.clone().into(), Read),
+    ]);
+    let approved = policy.for_approved_command(&context);
+    assert_eq!(approved.resolve_access(&formerly_readonly, &context), Deny);
+    let translated = materialize_volume_roots(approved, &volumes)?;
+    assert_eq!(
+        [
+            &volumes[0],
+            &volumes[1],
+            &formerly_readonly,
+            &secret,
+            &reopened,
+        ]
+        .map(|path| translated.resolve_access(path, &context)),
+        [Write, Write, Write, Deny, Deny]
+    );
+    assert_eq!(
+        [&root_git, &denied_root_metadata, &workspace_git]
+            .map(|path| translated.can_write_path(path, &context)),
+        [true, false, true]
+    );
+    Ok(())
+}
+
 fn canonical_root(temp: &tempfile::TempDir) -> Result<PathBuf> {
     Ok(
         PathUri::from_host_native_path(std::fs::canonicalize(temp.path())?)?
@@ -103,6 +155,7 @@ fn command(permissions: &PermissionProfile, cwd: &Path) -> MxcCommand {
         sandbox_policy_cwd: cwd.to_owned(),
         managed_network: None,
         command: vec!["program.exe".to_owned(), "--arg".to_owned()],
+        default_child_env: false,
     }
 }
 
@@ -121,6 +174,7 @@ fn wrapper_preserves_exact_argv_and_separate_command_cwd() -> Result<()> {
         "quotes\" and slash\\".to_owned(),
     ];
     let mut env = HashMap::new();
+    codex_windows_sandbox::environment_transport::encode("stale", &mut env)?;
     let wrapped = create_command_args(CreateMxcCommandArgsParams {
         command: argv.clone(),
         permission_profile: &profile,
@@ -130,6 +184,8 @@ fn wrapper_preserves_exact_argv_and_separate_command_cwd() -> Result<()> {
     })?;
     assert_eq!(wrapped, vec![crate::CODEX_WINDOWS_MXC_ARG1]);
     let parsed = crate::transport::decode(&mut env)?;
+    assert!(parsed.default_child_env);
+    assert!(env.is_empty());
     assert_eq!(
         (
             &parsed.permissions,
@@ -184,10 +240,12 @@ fn native_grants_preserve_denies_and_read_only_carveouts() -> Result<()> {
     let request = build_request(&command(&profile, root), root, Vec::new(), &[], &[])?;
     let mut expected_read = [
         root.join(".agents"),
+        root.join(".aws"),
         root.join(".codex"),
         root.join(".git"),
         readonly,
         writable_child.join(".agents"),
+        writable_child.join(".aws"),
         writable_child.join(".codex"),
         writable_child.join(".git"),
     ];
@@ -244,6 +302,7 @@ fn volume_expansion_does_not_turn_read_only_child_writable() -> Result<()> {
         request.policy.readonly_paths,
         vec![
             root.join(".agents").to_str().unwrap(),
+            root.join(".aws").to_str().unwrap(),
             root.join(".codex").to_str().unwrap(),
             root.join(".git").to_str().unwrap(),
             readonly.to_str().unwrap()
@@ -557,7 +616,7 @@ fn root_deny_keeps_only_narrow_explicit_grants() -> Result<()> {
             FileSystemAccessMode::Read => (Vec::new(), allowed),
             FileSystemAccessMode::Write => (
                 allowed,
-                [".agents", ".codex", ".git"]
+                [".agents", ".aws", ".codex", ".git"]
                     .map(|name| child.join(name).to_str().unwrap().to_owned())
                     .to_vec(),
             ),
@@ -730,11 +789,13 @@ fn symbolic_root_preserves_equal_path_precedence_and_denies() -> Result<()> {
         reads_in_volumes,
         volumes[..2]
             .iter()
-            .flat_map(|volume| [".agents", ".codex", ".git"].map(|name| volume
-                .join(name)
-                .to_str()
-                .unwrap()
-                .to_owned()))
+            .flat_map(
+                |volume| [".agents", ".aws", ".codex", ".git"].map(|name| volume
+                    .join(name)
+                    .to_str()
+                    .unwrap()
+                    .to_owned())
+            )
             .collect::<Vec<_>>()
     );
     assert_eq!(

@@ -5,6 +5,8 @@
 //! events, keeps server metadata, and aggregates tools and resources across
 //! running RMCP clients.
 
+#[path = "connection_manager/catalog_telemetry.rs"]
+mod catalog_telemetry;
 #[path = "connection_manager/required.rs"]
 mod required;
 #[path = "connection_manager/resources.rs"]
@@ -62,8 +64,10 @@ use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
 use codex_config::McpServerTransportConfig;
+use codex_config::McpStartupReadiness;
 use codex_diagnostics::Gauge;
 use codex_diagnostics::GaugeGuard;
+use codex_otel::auth_storage::AuthStorageOriginator;
 use codex_protocol::mcp::CallToolResult;
 use codex_protocol::mcp::McpServerInfo;
 use codex_protocol::protocol::Event;
@@ -134,6 +138,21 @@ impl McpServerConnection {
         self.client.client().await
     }
 
+    async fn client_for_call(&self) -> Result<ManagedClient, StartupOutcomeError> {
+        let result = self.client().await;
+        if matches!(result, Err(StartupOutcomeError::Failed { .. }))
+            && !self.client.cancel_token.is_cancelled()
+            && let Some(reconnect) = &self.client.startup_reconnect
+        {
+            if let Some(attempt) = reconnect.reconnect_in_background() {
+                return attempt.await;
+            }
+            // Recovery may have finished between reading the client and joining it.
+            return self.client().await;
+        }
+        result
+    }
+
     async fn shutdown(&self) {
         self.client.shutdown().await;
     }
@@ -161,6 +180,7 @@ impl Drop for McpServerConnection {
 struct McpServerView {
     connection: Arc<McpServerConnection>,
     protocol_mode: crate::McpProtocolMode,
+    startup_readiness: McpStartupReadiness,
     metadata: McpServerMetadata,
     tool_filter: ToolFilter,
     tool_timeout: Option<Duration>,
@@ -168,6 +188,28 @@ struct McpServerView {
 }
 
 impl McpServerView {
+    fn allows_cached_startup(&self) -> bool {
+        self.startup_readiness == McpStartupReadiness::Catalog
+            || self.connection.startup_is_dormant()
+    }
+
+    fn cached_startup_tools(&self, fallback: Option<Vec<ToolInfo>>) -> Option<Vec<ToolInfo>> {
+        self.connection
+            .client
+            .cached_tools_or(fallback)
+            .filter(|tools| self.accepts_cached_tools(tools))
+    }
+
+    fn accepts_cached_tools(&self, tools: &[ToolInfo]) -> bool {
+        self.connection.client.is_codex_apps_mcp_server
+            || match self.startup_readiness {
+                McpStartupReadiness::Connection => !tools.is_empty(),
+                McpStartupReadiness::Catalog => tools.iter().any(|tool| {
+                    self.tool_filter.allows(&tool.tool.name) && tool_is_model_visible(tool)
+                }),
+            }
+    }
+
     async fn listed_tools(
         &self,
         tool_plugin_context: &ToolPluginContext,
@@ -496,6 +538,7 @@ impl McpConnectionSet {
                         McpServerView {
                             connection,
                             protocol_mode,
+                            startup_readiness: configured_config.startup_readiness,
                             metadata,
                             tool_filter: configured_tool_filter,
                             tool_timeout: configured_tool_timeout,
@@ -633,6 +676,7 @@ impl McpConnectionSet {
                         _diagnostics_guard: LIVE_CONNECTIONS.track(),
                     }),
                     protocol_mode,
+                    startup_readiness: configured_config.startup_readiness,
                     metadata,
                     tool_filter: configured_tool_filter,
                     tool_timeout: configured_tool_timeout,
@@ -746,6 +790,7 @@ impl McpConnectionSet {
 
                 (server_name, outcome)
             };
+            let startup = AuthStorageOriginator::current().scope(startup);
             if defer_startup {
                 // Dormant servers must not hold the initial startup summary open.
                 tokio::spawn(startup);
@@ -867,15 +912,18 @@ impl McpConnectionSet {
             return Vec::new();
         }
 
+        let originator = AuthStorageOriginator::current();
         match tokio::task::spawn_blocking(move || {
-            candidates
-                .into_iter()
-                .filter_map(|(server_name, identity, config)| {
-                    identity
-                        .oauth_credentials_changed(&server_name, &config)
-                        .then_some(server_name)
-                })
-                .collect()
+            originator.sync_scope(|| {
+                candidates
+                    .into_iter()
+                    .filter_map(|(server_name, identity, config)| {
+                        identity
+                            .oauth_credentials_changed(&server_name, &config)
+                            .then_some(server_name)
+                    })
+                    .collect()
+            })
         })
         .await
         {
@@ -891,7 +939,8 @@ impl McpConnectionSet {
         let Some(view) = self.servers.get(server_name) else {
             return false;
         };
-        view.connection.client.ready_transport().is_some() || view.connection.client().await.is_ok()
+        view.connection.client.ready_transport().is_some()
+            || view.connection.client_for_call().await.is_ok()
     }
 
     /// Stop all MCP clients owned by this manager and terminate stdio server processes.
@@ -1023,9 +1072,12 @@ impl McpConnectionSet {
     /// Returns presentation metadata from the current connection.
     /// Codex Apps metadata may come from its existing cache; regular MCP server information is
     /// connection-specific, so pending regular clients are awaited.
-    pub(crate) async fn list_available_server_infos(&self) -> HashMap<String, McpServerInfo> {
+    pub(crate) async fn list_available_server_infos(
+        &self,
+        include_server: impl Fn(&str) -> bool,
+    ) -> HashMap<String, McpServerInfo> {
         let mut server_infos = HashMap::new();
-        for (server_name, view) in &self.servers {
+        for (server_name, view) in self.servers.iter().filter(|(name, _)| include_server(name)) {
             let client = &view.connection.client;
             if !client.startup_complete.load(Ordering::Acquire)
                 && let Some(server_info) = client.cached_server_info.clone()

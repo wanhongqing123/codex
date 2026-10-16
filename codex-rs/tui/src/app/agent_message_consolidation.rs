@@ -8,7 +8,6 @@
 //! resize re-renders. The retained view preserves its displayed revision before that
 //! replacement, then repaints without replaying terminal scrollback.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use color_eyre::eyre::Result;
@@ -18,7 +17,6 @@ use super::resize_reflow::trailing_run_start;
 use crate::app_event::ConsolidationScrollbackReflow;
 use crate::history_cell;
 use crate::history_cell::HistoryCell;
-use crate::inline_visualization::InlineVisualizationContext;
 use crate::pager_overlay::Overlay;
 use crate::tui;
 
@@ -27,9 +25,7 @@ impl App {
         &mut self,
         tui: &mut tui::Tui,
         message_id: Option<String>,
-        source: String,
-        cwd: PathBuf,
-        inline_visualization_context: Option<InlineVisualizationContext>,
+        source: history_cell::AgentMarkdownCell,
         scrollback_reflow: ConsolidationScrollbackReflow,
         deferred_history_cell: Option<Box<dyn HistoryCell>>,
     ) -> Result<()> {
@@ -50,30 +46,27 @@ impl App {
         // Walk backward to find the contiguous run of streaming AgentMessageCells that
         // belong to the just-finalized stream.
         let end = self.transcript_cells.len();
+        let source_length = source.copy_source().map_or(/*default*/ 0, str::len);
+        let has_source = source
+            .copy_source()
+            .is_some_and(|text| !text.trim().is_empty());
         tracing::debug!(
             "ConsolidateAgentMessage: transcript_cells.len()={end}, source_len={}",
-            source.len()
+            source_length
         );
         let start = trailing_run_start::<history_cell::AgentMessageCell>(&self.transcript_cells);
         let outcome = if start < end {
             "history_replaced"
-        } else if !source.trim().is_empty() {
+        } else if has_source {
             "history_inserted"
         } else {
             "empty_completion"
         };
-        let source_length = source.len();
         if start < end {
             tracing::debug!(
                 "ConsolidateAgentMessage: replacing cells [{start}..{end}] with AgentMarkdownCell"
             );
-            let consolidated: Arc<dyn HistoryCell> = Arc::new(
-                history_cell::AgentMarkdownCell::new_with_inline_visualizations(
-                    source,
-                    &cwd,
-                    inline_visualization_context,
-                ),
-            );
+            let consolidated: Arc<dyn HistoryCell> = Arc::new(source);
             self.native_history
                 .consolidate(&self.transcript_cells[start..end], &consolidated);
             if tui.is_owned_screen() {
@@ -98,25 +91,16 @@ impl App {
             }
 
             self.finish_agent_message_consolidation(tui, scrollback_reflow)?;
-        } else if !source.trim().is_empty() {
+        } else if has_source {
             // A stream controller can exist without having emitted a history
             // cell (for example after an empty delta). Completion still carries
             // authoritative text: preserve it in both scrollback and Ctrl+T.
             tracing::warn!(
-                source_len = source.len(),
+                source_len = source_length,
                 transcript_cells = end,
                 "ConsolidateAgentMessage: inserting completion without provisional cells"
             );
-            self.insert_history_cell(
-                tui,
-                Box::new(
-                    history_cell::AgentMarkdownCell::new_with_inline_visualizations(
-                        source,
-                        &cwd,
-                        inline_visualization_context,
-                    ),
-                ),
-            );
+            self.insert_history_cell(tui, Box::new(source));
             self.finish_agent_message_consolidation(tui, scrollback_reflow)?;
         } else {
             self.maybe_finish_stream_reflow(tui)?;

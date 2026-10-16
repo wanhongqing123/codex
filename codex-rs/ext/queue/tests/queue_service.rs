@@ -393,7 +393,7 @@ async fn starting_a_selected_item_preserves_the_remaining_queue() -> anyhow::Res
 
     assert!(matches!(
         submission,
-        StartIfIdleSubmission::Started { turn_id } if !turn_id.is_empty()
+        StartIfIdleSubmission::Started { turn_id, .. } if !turn_id.is_empty()
     ));
     assert_eq!(vec![first], service.list(thread_id).await?);
     wait_for_event_match(test.codex.as_ref(), |event| match event {
@@ -690,7 +690,7 @@ async fn externally_changed_queues_dispatch_independently_and_retry_failed_wakes
     advance_queue_poll().await;
     let resumed = test
         .thread_manager
-        .resume_thread_from_rollout(
+        .resume_legacy_thread_from_rollout(
             test.config.clone(),
             rollout_path,
             test.thread_manager.auth_manager(),

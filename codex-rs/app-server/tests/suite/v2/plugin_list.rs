@@ -279,9 +279,13 @@ enabled = true
     Ok(())
 }
 
+#[test_case("", true; "without default")]
+#[test_case("[plugins._default]\nenabled = false", false; "default disabled")]
 #[tokio::test]
-async fn plugin_installed_prefers_remote_curated_conflicts_when_remote_plugin_enabled() -> Result<()>
-{
+async fn plugin_installed_prefers_remote_curated_conflicts_when_remote_plugin_enabled(
+    plugin_config: &str,
+    expected_remote_enabled: bool,
+) -> Result<()> {
     let codex_home = TempDir::new()?;
     let server = MockServer::start().await;
     write_openai_curated_marketplace(codex_home.path(), &["linear", "calendar"])?;
@@ -301,6 +305,8 @@ enabled = true
 
 [plugins."calendar@openai-curated"]
 enabled = true
+
+{plugin_config}
 "#,
             server.uri()
         ),
@@ -356,9 +362,9 @@ enabled = true
         local_marketplace
             .plugins
             .iter()
-            .map(|plugin| plugin.id.clone())
+            .map(|plugin| (plugin.id.clone(), plugin.enabled))
             .collect::<Vec<_>>(),
-        vec!["calendar@openai-curated".to_string()]
+        vec![("calendar@openai-curated".to_string(), true)]
     );
     let remote_marketplace = response
         .marketplaces
@@ -372,6 +378,7 @@ enabled = true
             .map(|plugin| {
                 (
                     plugin.id.clone(),
+                    plugin.enabled,
                     plugin.install_policy_source,
                     plugin.must_show_installation_interstitial,
                 )
@@ -380,11 +387,13 @@ enabled = true
         vec![
             (
                 "linear@openai-curated-remote".to_string(),
+                expected_remote_enabled,
                 Some(PluginInstallPolicySource::WorkspaceSetting),
                 Some(false),
             ),
             (
                 "remote-only@openai-curated-remote".to_string(),
+                expected_remote_enabled,
                 Some(PluginInstallPolicySource::WorkspaceSetting),
                 Some(false),
             ),
@@ -639,7 +648,6 @@ async fn plugin_list_keeps_valid_marketplaces_when_another_marketplace_fails_to_
             path: Some(valid_marketplace_path),
             interface: None,
             plugins: vec![PluginSummary {
-                extensions: None,
                 id: "valid-plugin@valid-marketplace".to_string(),
                 remote_plugin_id: None,
                 version: None,
@@ -761,7 +769,6 @@ async fn plugin_list_uses_alternate_discoverable_manifest_and_keeps_undiscoverab
             interface: None,
             plugins: vec![
                 PluginSummary {
-                    extensions: None,
                     id: "valid-plugin@alternate-marketplace".to_string(),
                     remote_plugin_id: None,
                     version: None,
@@ -805,7 +812,6 @@ async fn plugin_list_uses_alternate_discoverable_manifest_and_keeps_undiscoverab
                     keywords: Vec::new(),
                 },
                 PluginSummary {
-                    extensions: None,
                     id: "missing-plugin@alternate-marketplace".to_string(),
                     remote_plugin_id: None,
                     version: None,
@@ -1335,8 +1341,15 @@ async fn plugin_catalogs_skip_invalid_project_config_and_report_cwd_error() -> R
     Ok(())
 }
 
+#[test_case("", "enabled = true", true; "legacy explicit enabled")]
+#[test_case("[plugins._default]\nenabled = false", "mcp_servers.example.tools.search.approval_mode = 'approve'", false; "default disabled approval-only entry")]
+#[test_case("[plugins._default]\nenabled = false", "enabled = true", true; "explicitly enabled overrides default")]
 #[tokio::test]
-async fn plugin_list_includes_install_and_enabled_state_from_config() -> Result<()> {
+async fn plugin_list_includes_install_and_enabled_state_from_config(
+    plugin_default: &str,
+    plugin_settings: &str,
+    expected_enabled: bool,
+) -> Result<()> {
     let codex_home = TempDir::new()?;
     let repo_root = TempDir::new()?;
     std::fs::create_dir_all(repo_root.path().join(".git"))?;
@@ -1377,15 +1390,19 @@ async fn plugin_list_includes_install_and_enabled_state_from_config() -> Result<
     )?;
     std::fs::write(
         codex_home.path().join("config.toml"),
-        r#"[features]
+        format!(
+            r#"[features]
 plugins = true
 
+{plugin_default}
+
 [plugins."enabled-plugin@codex-curated"]
-enabled = true
+{plugin_settings}
 
 [plugins."disabled-plugin@codex-curated"]
 enabled = false
 "#,
+        ),
     )?;
 
     let mut mcp = TestAppServer::builder()
@@ -1430,7 +1447,7 @@ enabled = false
     assert_eq!(marketplace.plugins[0].id, "enabled-plugin@codex-curated");
     assert_eq!(marketplace.plugins[0].name, "enabled-plugin");
     assert_eq!(marketplace.plugins[0].installed, true);
-    assert_eq!(marketplace.plugins[0].enabled, true);
+    assert_eq!(marketplace.plugins[0].enabled, expected_enabled);
     assert_eq!(
         marketplace.plugins[0].install_policy,
         PluginInstallPolicy::Available
@@ -1465,6 +1482,35 @@ enabled = false
     assert_eq!(
         marketplace.plugins[2].auth_policy,
         PluginAuthPolicy::OnInstall
+    );
+
+    let request_id = mcp
+        .send_plugin_installed_request(PluginInstalledParams {
+            cwds: Some(vec![AbsolutePathBuf::try_from(repo_root.path())?]),
+            install_suggestion_plugin_names: None,
+        })
+        .await?;
+    let response: PluginInstalledResponse =
+        timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
+    let installed = response
+        .marketplaces
+        .into_iter()
+        .find(|entry| entry.path == marketplace.path)
+        .expect("expected installed repo marketplace entry");
+    assert_eq!(
+        installed
+            .plugins
+            .into_iter()
+            .map(|plugin| (plugin.id, plugin.installed, plugin.enabled))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                "enabled-plugin@codex-curated".to_string(),
+                true,
+                expected_enabled,
+            ),
+            ("disabled-plugin@codex-curated".to_string(), true, false),
+        ]
     );
     Ok(())
 }
@@ -2091,14 +2137,20 @@ enum ProjectPluginConfiguration {
     Invalid,
 }
 
-#[test_case(ProjectPluginConfiguration::None, None; "without project override")]
-#[test_case(ProjectPluginConfiguration::Disabled, None; "project disables local plugins")]
-#[test_case(ProjectPluginConfiguration::Invalid, None; "invalid project preserves remote plugins")]
-#[test_case(ProjectPluginConfiguration::None, Some("tpp"); "configured product sku")]
+#[test_case(ProjectPluginConfiguration::None, None, "", true, true; "without project override")]
+#[test_case(ProjectPluginConfiguration::Disabled, None, "", true, true; "project disables local plugins")]
+#[test_case(ProjectPluginConfiguration::Invalid, None, "", true, true; "invalid project preserves remote plugins")]
+#[test_case(ProjectPluginConfiguration::None, Some("tpp"), "", true, true; "configured product sku")]
+#[test_case(ProjectPluginConfiguration::None, None, "[plugins._default]\nenabled = false", true, false; "default disabled")]
+#[test_case(ProjectPluginConfiguration::None, None, "[plugins._default]\nenabled = false\n[plugins.\"linear@openai-curated-remote\"]\nenabled = true", true, true; "explicitly enabled")]
+#[test_case(ProjectPluginConfiguration::None, None, "[plugins._default]\nenabled = false\n[plugins.\"linear@openai-curated-remote\"]\nenabled = true", false, false; "source disabled")]
 #[tokio::test]
 async fn plugin_list_includes_remote_marketplaces_when_remote_plugin_enabled(
     project_configuration: ProjectPluginConfiguration,
     product_sku: Option<&str>,
+    plugin_config: &str,
+    source_enabled: bool,
+    expected_enabled: bool,
 ) -> Result<()> {
     let codex_home = TempDir::new()?;
     let server = MockServer::start().await;
@@ -2106,6 +2158,9 @@ async fn plugin_list_includes_remote_marketplaces_when_remote_plugin_enabled(
         codex_home.path(),
         &format!("{}/backend-api/", server.uri()),
     )?;
+    let config_path = codex_home.path().join("config.toml");
+    let config = std::fs::read_to_string(&config_path)?;
+    std::fs::write(config_path, format!("{config}\n{plugin_config}\n"))?;
     write_chatgpt_auth(
         codex_home.path(),
         ChatGptAuthFixture::new("chatgpt-token")
@@ -2213,6 +2268,8 @@ async fn plugin_list_includes_remote_marketplaces_when_remote_plugin_enabled(
   }
 }"#;
 
+    let mut global_installed_body: serde_json::Value = serde_json::from_str(global_installed_body)?;
+    global_installed_body["plugins"][0]["enabled"] = serde_json::json!(source_enabled);
     let expected_product_sku = product_sku.unwrap_or("codex");
     Mock::given(method("GET"))
         .and(path("/backend-api/ps/plugins/list"))
@@ -2240,7 +2297,7 @@ async fn plugin_list_includes_remote_marketplaces_when_remote_plugin_enabled(
         .and(header("authorization", "Bearer chatgpt-token"))
         .and(header("chatgpt-account-id", "account-123"))
         .and(header("oai-product-sku", expected_product_sku))
-        .respond_with(ResponseTemplate::new(200).set_body_string(global_installed_body))
+        .respond_with(ResponseTemplate::new(200).set_body_json(global_installed_body))
         .mount(&server)
         .await;
     Mock::given(method("GET"))
@@ -2332,7 +2389,7 @@ async fn plugin_list_includes_remote_marketplaces_when_remote_plugin_enabled(
         remote_marketplace.plugins[0].installed_at,
         Some(1_767_312_000)
     );
-    assert_eq!(remote_marketplace.plugins[0].enabled, true);
+    assert_eq!(remote_marketplace.plugins[0].enabled, expected_enabled);
     assert_eq!(
         remote_marketplace.plugins[0].install_policy_source,
         Some(PluginInstallPolicySource::ImplicitCanonicalApp)
@@ -3490,161 +3547,6 @@ async fn plugin_list_does_not_append_global_remote_when_marketplace_kinds_are_ex
             .all(|marketplace| marketplace.name != "openai-curated-remote")
     );
     wait_for_remote_plugin_request_count(&server, "/ps/plugins/list", /*expected_count*/ 0).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn plugin_installed_preserves_extensions_and_ignores_incompatible_metadata() -> Result<()> {
-    let codex_home = TempDir::new()?;
-    let server = MockServer::start().await;
-    write_plugins_enabled_config_with_base_url(
-        codex_home.path(),
-        &format!("{}/backend-api", server.uri()),
-    )?;
-    write_chatgpt_auth(
-        codex_home.path(),
-        ChatGptAuthFixture::new("chatgpt-token")
-            .account_id("account-123")
-            .chatgpt_user_id("user-123")
-            .chatgpt_account_id("account-123"),
-        AuthCredentialsStoreMode::File,
-    )?;
-    let icon = serde_json::json!({
-        "src": "https://example.com/parts.svg",
-        "mimeType": "image/svg+xml",
-        "sizes": ["any"],
-        "theme": "light",
-    });
-    let quick_action = serde_json::json!({
-        "title": "Add part",
-        "icons": [icon.clone()],
-        "target": {"type": "tool", "name": "parts.add", "arguments": {}},
-    });
-    let extensions = serde_json::json!({
-        "entrypoints": [{
-            "type": "global",
-            "app_id": "parts-app",
-            "tool_name": "parts.open",
-            "title": "Parts",
-            "resource_uri": "ui://parts/library",
-            "icons": [icon.clone()],
-            "quick_action": quick_action.clone(),
-        }],
-        "settings": [{
-            "app_id": "parts-app",
-            "read_tool_name": "settings.read",
-            "update_tool_name": "settings.update",
-        }],
-    });
-    let mut unknown_entrypoint = extensions.clone();
-    unknown_entrypoint["entrypoints"][0]["type"] = serde_json::json!("futurePlacement");
-    let mut unknown_action = extensions.clone();
-    unknown_action["entrypoints"][0]["quick_action"]["target"]["type"] =
-        serde_json::json!("futureAction");
-    let mut body: serde_json::Value = serde_json::from_str(&remote_installed_plugin_body(
-        "", "1.2.3", /*enabled*/ true,
-    ))?;
-    let template = body["plugins"][0].clone();
-    body["plugins"][0]["extensions"] = extensions;
-    for (id, name, extensions) in [
-        (
-            "plugins~Plugin_11111111111111111111111111111111",
-            "future-placement",
-            unknown_entrypoint,
-        ),
-        (
-            "plugins~Plugin_22222222222222222222222222222222",
-            "future-action",
-            unknown_action,
-        ),
-    ] {
-        let mut plugin = template.clone();
-        plugin["id"] = serde_json::json!(id);
-        plugin["name"] = serde_json::json!(name);
-        plugin["extensions"] = extensions;
-        body["plugins"].as_array_mut().unwrap().push(plugin);
-    }
-    mount_remote_installed_plugins(&server, "GLOBAL", &serde_json::to_string(&body)?).await;
-    mount_remote_installed_plugins(&server, "WORKSPACE", empty_remote_installed_plugins_body())
-        .await;
-    mount_empty_user_installed_plugins(&server).await;
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
-        .await?;
-    let expected = BTreeMap::from([
-        (
-            "linear@openai-curated-remote".to_string(),
-            serde_json::json!({
-                "entrypoints": [{
-                    "type": "global",
-                    "appId": "parts-app",
-                    "toolName": "parts.open",
-                    "title": "Parts",
-                    "resourceUri": "ui://parts/library",
-                    "icons": [icon],
-                    "quickAction": quick_action,
-                }],
-                "settingsEntrypoints": [],
-                "settings": [{
-                    "appId": "parts-app",
-                    "readToolName": "settings.read",
-                    "updateToolName": "settings.update",
-                }],
-                "threadEntrypoints": [],
-                "fileHandlers": [],
-                "searchMentionProviders": [],
-            }),
-        ),
-        (
-            "future-placement@openai-curated-remote".to_string(),
-            serde_json::Value::Null,
-        ),
-        (
-            "future-action@openai-curated-remote".to_string(),
-            serde_json::Value::Null,
-        ),
-    ]);
-    for read in 0..2 {
-        let request_id = mcp
-            .send_plugin_installed_request(PluginInstalledParams {
-                cwds: None,
-                install_suggestion_plugin_names: None,
-            })
-            .await?;
-        let response: serde_json::Value =
-            timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
-        let marketplace = response["marketplaces"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|marketplace| marketplace["name"] == "openai-curated-remote")
-            .expect("remote inventory should survive incompatible extension metadata");
-        let actual = marketplace["plugins"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|plugin| {
-                (
-                    plugin["id"].as_str().unwrap().to_string(),
-                    plugin.get("extensions").unwrap().clone(),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        assert_eq!(actual, expected);
-        if read == 0 {
-            let request_id = mcp
-                .send_raw_request(
-                    "plugin/reconcile",
-                    Some(serde_json::json!({"reason": "tooling_changed"})),
-                )
-                .await?;
-            let _: serde_json::Value =
-                timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
-            // Reconciliation publishes the cache before the backend becomes unavailable.
-            server.reset().await;
-        }
-    }
     Ok(())
 }
 

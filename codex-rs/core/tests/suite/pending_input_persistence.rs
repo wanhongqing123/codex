@@ -12,10 +12,12 @@ use codex_core::TurnInputSubmission;
 use codex_features::Feature;
 use codex_history::InitialHistory;
 use codex_history::ResumedHistory;
+use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::user_input::UserInput;
@@ -64,6 +66,18 @@ enum InputKind {
     ToolOutput,
 }
 
+#[derive(Clone, Copy)]
+enum InferenceCompletion {
+    Response,
+    Interrupt,
+}
+
+#[derive(Clone, Copy)]
+enum FirstInputKind {
+    User,
+    InterAgentCommunication,
+}
+
 #[derive(Debug)]
 struct PendingCheckpoint {
     thread_id: ThreadId,
@@ -96,7 +110,7 @@ impl ThreadStore for GatedCheckpointStore {
 
     delegate_store_methods! {
         fn create_thread(params: CreateThreadParams) -> ();
-        fn resume_thread(params: ResumeThreadParams) -> ();
+        fn resume_thread(params: ResumeThreadParams) -> Arc<Vec<RolloutItem>>;
         fn append_items(params: AppendThreadItemsParams) -> ();
         fn discard_thread(thread_id: ThreadId) -> ();
         fn load_history(params: LoadThreadHistoryParams) -> StoredThreadHistory;
@@ -166,13 +180,16 @@ impl ThreadStore for GatedCheckpointStore {
     }
 }
 
-#[test_case(CheckpointPolicy::Background, InputKind::User; "background_user_input")]
-#[test_case(CheckpointPolicy::Synchronous, InputKind::User; "synchronous_store")]
-#[test_case(CheckpointPolicy::Background, InputKind::ToolOutput; "tool_output_stays_synchronous")]
+#[test_case(CheckpointPolicy::Background, InputKind::User, InferenceCompletion::Response; "background_user_input")]
+#[test_case(CheckpointPolicy::Synchronous, InputKind::User, InferenceCompletion::Response; "synchronous_store")]
+#[test_case(CheckpointPolicy::Background, InputKind::ToolOutput, InferenceCompletion::Response; "tool_output_stays_synchronous")]
+#[test_case(CheckpointPolicy::Background, InputKind::User, InferenceCompletion::Interrupt; "background_user_input_interrupts")]
+#[test_case(CheckpointPolicy::Synchronous, InputKind::User, InferenceCompletion::Interrupt; "synchronous_store_interrupts")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn steered_input_checkpoint_controls_next_request(
     policy: CheckpointPolicy,
     input_kind: InputKind,
+    inference_completion: InferenceCompletion,
 ) -> anyhow::Result<()> {
     let (first_completed, first_completion) = oneshot::channel();
     let (second_completed, second_completion) = oneshot::channel();
@@ -217,7 +234,23 @@ async fn steered_input_checkpoint_controls_next_request(
     let test = test_codex()
         .with_thread_store(store.clone())
         .with_history_mode(ThreadHistoryMode::Legacy)
-        .with_config(move |config| config.model_provider.base_url = Some(base_url))
+        .with_config(move |config| {
+            config.model_provider.base_url = Some(base_url);
+            // Tool outputs must wait for response completion even with interruption enabled.
+            if matches!(inference_completion, InferenceCompletion::Response)
+                && input_kind == InputKind::User
+            {
+                config
+                    .features
+                    .disable(Feature::InstantInterrupt)
+                    .expect("disable interruption for response completion");
+            } else {
+                config
+                    .features
+                    .enable(Feature::InstantInterrupt)
+                    .expect("enable interruption for steered input");
+            }
+        })
         .build_with_auto_env(&config_server)
         .await?;
     let first = test
@@ -227,7 +260,7 @@ async fn steered_input_checkpoint_controls_next_request(
             text_elements: Vec::new(),
         }]))
         .await?;
-    let TurnInputSubmission::Started { turn_id } = first else {
+    let TurnInputSubmission::Started { turn_id, .. } = first else {
         panic!("first input should start a turn");
     };
     wait_for_event(&test.codex, |event| {
@@ -251,11 +284,22 @@ async fn steered_input_checkpoint_controls_next_request(
     };
     assert_eq!(
         test.codex.start_or_steer_turn(input).await?,
-        TurnInputSubmission::Steered { turn_id }
+        TurnInputSubmission::Steered {
+            root_turn_id: turn_id.clone(),
+            turn_id
+        }
     );
-    // Steering still waits for the existing inference stream to finish.
-    assert!(checkpoint_requests.try_recv().is_err());
-    first_completed.send(()).expect("finish original inference");
+    let first_completed = match inference_completion {
+        InferenceCompletion::Response => {
+            // Without preemption, steering waits for the existing inference stream.
+            assert!(checkpoint_requests.try_recv().is_err());
+            first_completed.send(()).expect("finish original inference");
+            None
+        }
+        // Keep the first response gated until the follow-up request proves that
+        // interruption, rather than server completion, advanced the turn.
+        InferenceCompletion::Interrupt => Some(first_completed),
+    };
     let checkpoint = timeout(Duration::from_secs(10), checkpoint_requests.recv())
         .await?
         .expect("Core should checkpoint the accepted input");
@@ -287,6 +331,11 @@ async fn steered_input_checkpoint_controls_next_request(
     assert_eq!(requests.len(), 2);
     assert!(!String::from_utf8_lossy(&requests[0]).contains("steered input"));
     assert!(String::from_utf8_lossy(&requests[1]).contains("steered input"));
+    if let Some(first_completed) = first_completed {
+        first_completed
+            .send(())
+            .expect("release interrupted response");
+    }
     second_completed
         .send(())
         .expect("finish follow-up inference");
@@ -299,8 +348,12 @@ async fn steered_input_checkpoint_controls_next_request(
     Ok(())
 }
 
+#[test_case(FirstInputKind::User; "user_input")]
+#[test_case(FirstInputKind::InterAgentCommunication; "inter_agent_communication")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn preparation_and_first_sampling_do_not_wait_for_durable_metadata() -> anyhow::Result<()> {
+async fn preparation_and_first_sampling_do_not_wait_for_durable_metadata(
+    input_kind: FirstInputKind,
+) -> anyhow::Result<()> {
     let (complete, completion) = oneshot::channel();
     let (server, _completions) = start_streaming_sse_server(vec![vec![StreamingSseChunk {
         gate: Some(completion),
@@ -332,16 +385,44 @@ async fn preparation_and_first_sampling_do_not_wait_for_durable_metadata() -> an
         "type": "message", "role": "developer", "content": [{"type": "input_text", "text": "prepared context"}]
     }))?])).await??;
     assert!(checkpoint_requests.try_recv().is_err());
-    test.codex
-        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
-            text: "first prompt".to_string(),
-            text_elements: Vec::new(),
-        }]))
-        .await?;
+    match input_kind {
+        FirstInputKind::User => {
+            assert!(matches!(
+                test.codex
+                    .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+                        text: "first prompt".to_string(),
+                        text_elements: Vec::new(),
+                    }]))
+                    .await?,
+                TurnInputSubmission::Started { .. }
+            ));
+        }
+        FirstInputKind::InterAgentCommunication => {
+            test.codex
+                .submit(Op::InterAgentCommunication {
+                    communication: InterAgentCommunication::new(
+                        AgentPath::try_from("/root/worker").expect("valid agent path"),
+                        AgentPath::root(),
+                        /*other_recipients*/ Vec::new(),
+                        "first prompt".to_string(),
+                        /*trigger_turn*/ true,
+                    ),
+                    start_options: Default::default(),
+                })
+                .await?;
+        }
+    }
     let checkpoint = timeout(Duration::from_secs(10), checkpoint_requests.recv())
         .await?
         .expect("first execution checkpoint");
-    assert_eq!(checkpoint.context, PersistContext::TurnStart);
+    assert_eq!(
+        checkpoint.context,
+        match input_kind {
+            FirstInputKind::User => PersistContext::TurnStart,
+            // Mailbox work enters through the pending-input drain, even on its first turn.
+            FirstInputKind::InterAgentCommunication => PersistContext::SteeredUserInput,
+        }
+    );
     timeout(
         Duration::from_secs(10),
         server.wait_for_request_count(/*count*/ 1),
@@ -361,14 +442,37 @@ async fn preparation_and_first_sampling_do_not_wait_for_durable_metadata() -> an
                 .flatten()
                 .filter_map(move |content| {
                     let text = content["text"].as_str()?;
-                    matches!(text, "prepared context" | "first prompt")
-                        .then(|| (item["role"].as_str().expect("message role"), text))
+                    matches!(text, "prepared context" | "first prompt").then(|| {
+                        (
+                            item["role"]
+                                .as_str()
+                                .or_else(|| item["author"].as_str())
+                                .expect("message role or agent author"),
+                            text,
+                        )
+                    })
                 })
         })
         .collect::<Vec<_>>();
+    let first_input_author = match input_kind {
+        FirstInputKind::User => "user",
+        FirstInputKind::InterAgentCommunication => {
+            let communication = request["input"]
+                .as_array()
+                .expect("request input")
+                .iter()
+                .find(|item| item["type"] == "agent_message")
+                .expect("accepted communication should reach the model");
+            assert_eq!(communication["recipient"], "/root");
+            "/root/worker"
+        }
+    };
     assert_eq!(
         prepared_input,
-        vec![("developer", "prepared context"), ("user", "first prompt")]
+        vec![
+            ("developer", "prepared context"),
+            (first_input_author, "first prompt")
+        ]
     );
     drop(checkpoint.complete);
     complete.send(()).expect("complete inference");
@@ -446,6 +550,7 @@ async fn local_preparation_is_durable_before_first_input_and_survives_restart(
         .resume_thread_with_history(
             initial.config.clone(),
             InitialHistory::Resumed(ResumedHistory {
+                history_revision: None,
                 conversation_id: context.thread_id,
                 history: Arc::new(context.items),
                 rollout_path: Some(rollout_path),
@@ -490,8 +595,16 @@ async fn local_preparation_is_durable_before_first_input_and_survives_restart(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum SpawnCaller {
+    NativeV1,
+    NativeV2,
+}
+
+#[test_case(SpawnCaller::NativeV1; "native_v1")]
+#[test_case(SpawnCaller::NativeV2; "native_v2")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cancelled_spawn_discards_provisional_child() -> anyhow::Result<()> {
+async fn cancelled_spawn_discards_provisional_child(caller: SpawnCaller) -> anyhow::Result<()> {
     let server = responses::start_mock_server().await;
     let (checkpoints, mut checkpoint_requests) = mpsc::unbounded_channel();
     let store = Arc::new(GatedCheckpointStore {
@@ -505,8 +618,14 @@ async fn cancelled_spawn_discards_provisional_child() -> anyhow::Result<()> {
     let test = test_codex()
         .with_thread_store(store)
         .with_history_mode(ThreadHistoryMode::Legacy)
-        .with_config(|config| {
+        .with_config(move |config| {
             config.agent_max_depth = 1;
+            if matches!(caller, SpawnCaller::NativeV2) {
+                config
+                    .features
+                    .enable(Feature::MultiAgentV2)
+                    .expect("enable V2");
+            }
             config
                 .features
                 .enable(Feature::Collab)
@@ -514,15 +633,24 @@ async fn cancelled_spawn_discards_provisional_child() -> anyhow::Result<()> {
         })
         .build_with_auto_env(&server)
         .await?;
+    let (namespace, arguments) = match caller {
+        SpawnCaller::NativeV1 => (
+            "multi_agent_v1",
+            json!({"message":"child startup task", "task_name":"worker", "fork_context":true}),
+        ),
+        SpawnCaller::NativeV2 => (
+            "collaboration",
+            json!({"message":"child startup task", "task_name":"worker", "fork_turns":"all"}),
+        ),
+    };
     responses::mount_sse_once(
         &server,
         responses::sse(vec![
             responses::ev_function_call_with_namespace(
                 "spawn-checkpoint",
-                "multi_agent_v1",
+                namespace,
                 "spawn_agent",
-                &json!({"message":"child startup task", "task_name":"worker", "fork_context":true})
-                    .to_string(),
+                &arguments.to_string(),
             ),
             responses::ev_completed("parent-spawn"),
         ]),

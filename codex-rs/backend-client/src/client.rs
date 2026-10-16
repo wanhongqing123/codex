@@ -360,7 +360,9 @@ impl Client {
             Ok(Err(RequestError::Other(error)))
                 if error
                     .downcast_ref::<RouteAwareRequestError>()
-                    .is_some_and(|error| error.is_connect() || error.is_timeout()) => {}
+                    .is_some_and(|error| {
+                        error.is_connect() || error.is_timeout() || error.is_request()
+                    }) => {}
             Err(_) => {}
             Ok(response) => return response,
         }
@@ -781,6 +783,7 @@ impl Client {
             crate::types::PlanType::Plus => AccountPlanType::Plus,
             crate::types::PlanType::Pro => AccountPlanType::Pro,
             crate::types::PlanType::ProLite => AccountPlanType::ProLite,
+            crate::types::PlanType::ProMax => AccountPlanType::ProMax,
             crate::types::PlanType::Team => AccountPlanType::Team,
             crate::types::PlanType::SelfServeBusinessProLite => {
                 AccountPlanType::SelfServeBusinessProLite

@@ -1,4 +1,4 @@
-//! Shared agent discussions with interchangeable local and remote backends.
+//! Shared agent discussions with interchangeable local, in-memory and remote backends.
 //!
 //! Board identity and caller identity come from the host. Implementations own
 //! storage and notification fanout; tools and feature registration are separate.
@@ -6,11 +6,14 @@
 mod api;
 mod extension;
 mod host;
+mod in_memory;
 mod local;
+mod permissions;
 mod tools;
 mod types;
 
 pub use api::AgentMessageBoard;
+pub use api::ChannelDescription;
 pub use api::ChannelQuery;
 pub use api::CreateChannelRequest;
 pub use api::PageRequest;
@@ -28,8 +31,18 @@ pub use api::ThreadSort;
 pub use extension::install;
 pub use host::MessageBoardHost;
 pub use host::NotificationDelivery;
+pub use in_memory::InMemoryAgentMessageBoard;
+pub use in_memory::InMemoryMessageBoards;
 pub use local::LocalAgentMessageBoard;
+pub use local::connection::LocalBoard;
+pub use local::connection::LocalBoardConnection;
+pub use local::setup::LocalBoardSetup;
+pub use local::setup::configure_local_board;
+pub use permissions::BoardPermissions;
+pub use permissions::ChannelPermissions;
+pub use permissions::PermissionDenied;
 pub use tools::message_board_tools;
+pub use types::ChannelPage;
 pub use types::ChannelSummary;
 pub use types::Page;
 pub use types::PostContent;

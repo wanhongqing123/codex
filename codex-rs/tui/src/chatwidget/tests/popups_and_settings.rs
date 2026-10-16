@@ -379,8 +379,8 @@ async fn plugins_popup_upgrades_user_configured_git_marketplace_from_marketplace
     let popup = select_plugins_tab_containing(&mut chat, /*width*/ 100, "Repo Marketplace.");
     assert!(
         popup.contains("Repo Marketplace.")
-            && popup.contains("ctrl+u upgrade")
-            && popup.contains("ctrl+r remove")
+            && popup.contains("⌃u upgrade")
+            && popup.contains("⌃r remove")
             && popup.contains("Debug Plugin"),
         "expected upgradeable user-configured marketplace tab, got:\n{popup}"
     );
@@ -476,8 +476,8 @@ async fn marketplace_add_success_refreshes_to_new_marketplace_tab() {
     assert_chatwidget_snapshot!("plugins_popup_newly_installed_marketplace", popup);
     assert!(
         popup.contains("Debug Marketplace installed successfully.")
-            && popup.contains("ctrl+u upgrade")
-            && popup.contains("ctrl+r remove")
+            && popup.contains("⌃u upgrade")
+            && popup.contains("⌃r remove")
             && popup.contains("Debug Plugin"),
         "expected marketplace add refresh to switch to the new marketplace tab, got:\n{popup}"
     );
@@ -542,8 +542,8 @@ async fn plugins_popup_removes_user_configured_marketplace_flow() {
         select_plugins_tab_containing(&mut chat, /*width*/ 100, "Repo Marketplace.");
     assert!(
         repo_tab.contains("Repo Marketplace.")
-            && repo_tab.contains("ctrl+u upgrade")
-            && repo_tab.contains("ctrl+r remove")
+            && repo_tab.contains("⌃u upgrade")
+            && repo_tab.contains("⌃r remove")
             && repo_tab.contains("Debug Plugin"),
         "expected removable user-configured marketplace tab, got:\n{repo_tab}"
     );
@@ -611,7 +611,7 @@ async fn plugins_popup_removes_user_configured_marketplace_flow() {
         refreshed.contains("Browse plugins from available marketplaces.")
             && !refreshed.contains("Repo Marketplace")
             && !refreshed.contains("Debug Plugin")
-            && !refreshed.contains("ctrl+r remove"),
+            && !refreshed.contains("⌃r remove"),
         "expected refreshed plugin list without removed marketplace, got:\n{refreshed}"
     );
 }
@@ -1157,17 +1157,17 @@ async fn plugins_popup_admin_disabled_installed_plugin_has_no_toggle_hint() {
             && popup.contains("Disabled")
             && popup.contains("Press Enter to view plugin details")
             && !popup.contains("Disabled by admin")
-            && !popup.contains("Space to disable"),
+            && !popup.contains("Tab to disable"),
         "expected admin-disabled installed row to omit toggle hint, got:\n{popup}"
     );
 
     while rx.try_recv().is_ok() {}
     let before = render_bottom_popup(&chat, /*width*/ 120);
-    chat.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Tab));
     let after = render_bottom_popup(&chat, /*width*/ 120);
     assert!(
         rx.try_recv().is_err(),
-        "space should not toggle admin-disabled installed plugins"
+        "tab should not toggle admin-disabled installed plugins"
     );
     assert_eq!(after, before);
 }
@@ -1633,13 +1633,13 @@ async fn plugins_popup_refreshes_installed_counts_after_install() {
         "expected /plugins to refresh installed counts after install, got:\n{after}"
     );
     assert!(
-        after.contains("Installed   Space to disable; Enter view details"),
+        after.contains("Installed   Tab to disable; Enter view details"),
         "expected refreshed selected row copy to reflect the installed plugin state, got:\n{after}"
     );
 }
 
 #[tokio::test]
-async fn plugins_popup_space_toggles_installed_plugin_from_list() {
+async fn plugins_popup_toggle_keys_preserve_search_and_selection() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.set_feature_enabled(Feature::Plugins, /*enabled*/ true);
 
@@ -1685,17 +1685,68 @@ async fn plugins_popup_space_toggles_installed_plugin_from_list() {
         other => panic!("expected SetPluginEnabled event, got {other:?}"),
     }
 
+    type_plugins_search_query(&mut chat, "dr");
+    chat.handle_key_event(KeyEvent::from(KeyCode::Tab));
+
+    match rx.try_recv() {
+        Ok(AppEvent::SetPluginEnabled {
+            cwd: event_cwd,
+            plugin_id,
+            enabled,
+        }) => {
+            assert_eq!(event_cwd, cwd);
+            assert_eq!(plugin_id, "plugin-drive");
+            assert!(enabled);
+        }
+        other => panic!("expected SetPluginEnabled event, got {other:?}"),
+    }
+
     chat.on_plugin_enabled_set(
         cwd,
         "plugin-drive".to_string(),
-        /*enabled*/ false,
+        /*enabled*/ true,
         Ok(()),
     );
 
     let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert_chatwidget_snapshot!("plugins_popup_toggle_refresh_preserves_search", popup);
     assert!(
-        popup.contains("› [ ] Drive"),
-        "expected selected plugin row to stay selected after refresh, got:\n{popup}"
+        popup.lines().any(|line| line.trim() == "dr")
+            && popup.contains("› [*] Drive")
+            && popup.contains("Tab to disable"),
+        "expected the filtered plugin and search query to survive refresh, got:\n{popup}"
+    );
+}
+
+#[tokio::test]
+async fn plugins_popup_hides_tab_toggle_hint_when_tab_is_configured() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_feature_enabled(Feature::Plugins, /*enabled*/ true);
+    let mut keymap = crate::keymap::RuntimeKeymap::defaults();
+    keymap.list.move_down = vec![crate::key_hint::plain(KeyCode::Tab)];
+    chat.bottom_pane.set_keymap_bindings(&keymap);
+
+    let popup = render_loaded_plugins_popup(
+        &mut chat,
+        plugins_test_response(vec![plugins_test_curated_marketplace(vec![
+            plugins_test_summary(
+                "plugin-drive",
+                "drive",
+                Some("Drive"),
+                Some("Document access."),
+                /*installed*/ true,
+                /*enabled*/ true,
+                PluginInstallPolicy::Available,
+            ),
+        ])]),
+    );
+
+    assert_chatwidget_snapshot!("plugins_popup_custom_tab_binding_hides_toggle_hint", popup);
+    assert!(
+        popup.contains("Installed   Press Enter to view plugin details")
+            && !popup.contains("Tab to disable")
+            && !popup.contains("tab toggle"),
+        "expected configured Tab binding to hide unavailable toggle hints, got:\n{popup}"
     );
 }
 
@@ -3978,7 +4029,86 @@ async fn reasoning_shortcut_is_ignored_with_model_popup_open() {
 }
 
 #[tokio::test]
-async fn reasoning_up_shortcut_does_not_silently_enter_advanced_effort() {
+async fn reasoning_up_shortcuts_reach_max_in_default_and_plan_modes() {
+    for plan_mode in [false, true] {
+        for key in [
+            KeyEvent::new(KeyCode::Char('.'), KeyModifiers::ALT),
+            KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT),
+        ] {
+            let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
+            chat.thread_id = Some(ThreadId::new());
+            chat.show_welcome_banner = false;
+            chat.local_settings.tui.status_line = Some(vec!["model-with-reasoning".to_string()]);
+            let mut preset = get_available_model(&chat, "gpt-5.5");
+            preset
+                .supported_reasoning_efforts
+                .push(ReasoningEffortPreset {
+                    effort: ReasoningEffortConfig::Max,
+                    description: "Maximum reasoning".to_string(),
+                });
+            if plan_mode {
+                chat.set_feature_enabled(Feature::CollaborationModes, /*enabled*/ true);
+                let plan_mask = collaboration_modes::plan_mask(chat.model_catalog.as_ref())
+                    .expect("expected plan collaboration mode");
+                chat.set_collaboration_mask(plan_mask);
+            }
+            chat.model_catalog = std::sync::Arc::new(ModelCatalog::new(vec![preset]));
+            if plan_mode {
+                chat.set_plan_mode_reasoning_effort(Some(ReasoningEffortConfig::XHigh));
+            } else {
+                chat.set_reasoning_effort(Some(ReasoningEffortConfig::XHigh));
+            }
+
+            chat.handle_key_event(key);
+
+            let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+            let update = events
+                .into_iter()
+                .find(|event| {
+                    matches!(
+                        (plan_mode, event),
+                        (
+                            false,
+                            AppEvent::UpdateReasoningEffort(Some(ReasoningEffortConfig::Max))
+                        ) | (
+                            true,
+                            AppEvent::UpdatePlanModeReasoningEffort(Some(
+                                ReasoningEffortConfig::Max
+                            ))
+                        )
+                    )
+                })
+                .expect("expected max reasoning update");
+            match update {
+                AppEvent::UpdateReasoningEffort(effort) => chat.set_reasoning_effort(effort),
+                AppEvent::UpdatePlanModeReasoningEffort(effort) => {
+                    chat.set_plan_mode_reasoning_effort(effort)
+                }
+                _ => unreachable!(),
+            }
+
+            if key.code == KeyCode::Char('.') {
+                let width = 80;
+                let height = chat.desired_height(width);
+                let mut terminal =
+                    ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+                        .expect("create terminal");
+                terminal
+                    .draw(|frame| chat.render(frame.area(), frame.buffer_mut()))
+                    .expect("draw footer");
+                let snapshot = normalized_backend_snapshot(terminal.backend());
+                if plan_mode {
+                    assert_chatwidget_snapshot!("reasoning_shortcut_max_plan_footer", snapshot);
+                } else {
+                    assert_chatwidget_snapshot!("reasoning_shortcut_max_footer", snapshot);
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn reasoning_up_shortcut_does_not_silently_enter_ultra() {
     for (model, model_path) in [
         ("gpt-5.5", "All models → gpt-5.5"),
         ("codex-auto-test", "codex-auto-test"),
@@ -4002,29 +4132,27 @@ async fn reasoning_up_shortcut_does_not_silently_enter_advanced_effort() {
         chat.model_catalog = std::sync::Arc::new(ModelCatalog::new(vec![preset]));
         chat.set_model(model);
 
-        for effort in [ReasoningEffortConfig::XHigh, ReasoningEffortConfig::Max] {
-            chat.set_reasoning_effort(Some(effort));
-            chat.handle_key_event(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::ALT));
+        chat.set_reasoning_effort(Some(ReasoningEffortConfig::Max));
+        chat.handle_key_event(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::ALT));
 
-            let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
-            assert!(events.iter().all(|event| !matches!(
-                event,
-                AppEvent::UpdateReasoningEffort(_) | AppEvent::ApplyAdvancedReasoning { .. }
-            )));
-            let messages = events
-                .into_iter()
-                .filter_map(|event| match event {
-                    AppEvent::InsertHistoryCell(cell) => {
-                        Some(lines_to_single_string(&cell.display_lines(/*width*/ 140)))
-                    }
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(
-                messages,
-                vec![format!(
-                    "• Max and Ultra are available under /model → {model_path} → More reasoning…\n"
-                )]
+        let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        assert!(events.iter().all(|event| !matches!(
+            event,
+            AppEvent::UpdateReasoningEffort(_) | AppEvent::ApplyAdvancedReasoning { .. }
+        )));
+        let messages = events
+            .into_iter()
+            .filter_map(|event| match event {
+                AppEvent::InsertHistoryCell(cell) => {
+                    Some(lines_to_single_string(&cell.display_lines(/*width*/ 140)))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        insta::allow_duplicates! {
+            insta::assert_snapshot!(
+                messages.join("").replace(model_path, "<model path>"),
+                @"• Ultra is available under /model → <model path> → More reasoning…"
             );
         }
     }

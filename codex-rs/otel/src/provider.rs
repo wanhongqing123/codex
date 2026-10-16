@@ -201,6 +201,7 @@ impl OtelProvider {
             // Tracestate propagation is process-global; clear it when these
             // settings do not install an active provider.
             crate::trace_context::set_tracestate_entries(BTreeMap::new())?;
+            crate::metrics::buffered::GLOBAL.disable();
             debug!("No OTEL exporter enabled in settings.");
             return Ok(None);
         }
@@ -279,6 +280,8 @@ impl OtelProvider {
                     environment: settings.environment.clone(),
                 });
             }
+        } else {
+            crate::metrics::buffered::GLOBAL.disable();
         }
         Ok(Some(provider))
     }
@@ -338,9 +341,9 @@ impl OtelProvider {
     pub fn trace_export_filter(meta: &tracing::Metadata<'_>) -> bool {
         let target = meta.target();
         if meta.is_span() {
-            // h2 creates explicit-root spans that escape the SDK's telemetry suppression.
-            // Exporting them would make OTLP transport generate more OTLP exports.
-            target != "h2" && !target.starts_with("h2::")
+            // The exporter uses h2 and Tokio. Their root spans escape the
+            // SDK's suppression and would generate further OTLP exports.
+            !matches!(target.split("::").next(), Some("h2" | "tokio" | "runtime"))
         } else {
             is_trace_safe_target(target)
         }

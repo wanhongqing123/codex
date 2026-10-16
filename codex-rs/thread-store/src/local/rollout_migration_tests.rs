@@ -44,6 +44,7 @@ use codex_protocol::protocol::UserMessageEvent;
 use codex_protocol::protocol::UserMessageImageKind;
 use codex_protocol::user_input::UserInput;
 use codex_rollout::CompactedItem;
+use codex_rollout::RetainedContextEvent;
 use codex_rollout::RolloutConfig;
 use codex_rollout::RolloutItem;
 use codex_rollout::RolloutLine;
@@ -173,6 +174,8 @@ fn agent_message(text: &str) -> RolloutItem {
 
 fn input_response_message(role: &str, text: &str) -> ResponseItem {
     ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: role.to_string(),
         content: vec![ContentItem::InputText {
@@ -187,7 +190,7 @@ fn rollout_response_item(item: ResponseItem) -> RolloutItem {
     RolloutItem::ResponseItem(item.into())
 }
 
-fn exec_completion(turn_id: &str, call_id: &str) -> RolloutItem {
+fn exec_completion(turn_id: &str, call_id: &str, output: &str) -> RolloutItem {
     serde_json::from_value(json!({
         "type": "event_msg",
         "payload": {
@@ -198,12 +201,12 @@ fn exec_completion(turn_id: &str, call_id: &str) -> RolloutItem {
             "cwd": "file:///tmp",
             "parsed_cmd": [],
             "source": "agent",
-            "stdout": "ok",
+            "stdout": output,
             "stderr": "",
-            "aggregated_output": "ok",
+            "aggregated_output": output,
             "exit_code": 0,
             "duration": {"secs": 0, "nanos": 0},
-            "formatted_output": "ok",
+            "formatted_output": output,
             "status": "completed"
         }
     }))
@@ -226,6 +229,7 @@ fn item_completed(turn_id: &str, item_id: &str) -> RolloutItem {
 
 fn started(turn_id: &str) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+        turn_attribution: None,
         turn_id: turn_id.to_string(),
         root_turn_id: None,
         trace_id: None,
@@ -254,6 +258,7 @@ fn compacted(replacement_history: Vec<ResponseItem>) -> RolloutItem {
 
 fn completed(turn_id: &str) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+        root_turn_id: None,
         turn_id: turn_id.to_string(),
         last_agent_message: None,
         error: None,
@@ -416,7 +421,8 @@ async fn migration_publishes_canonical_projected_history_and_is_idempotent() {
 async fn migration_projects_explicit_and_implicit_legacy_completed_items() {
     let home = TempDir::new().expect("create Codex home");
     let thread_id = ThreadId::new();
-    let exec = exec_completion("explicit", "call-1");
+    let output = format!("head\n{}\ntail", "x".repeat(128 * 1024));
+    let exec = exec_completion("explicit", "call-1", &output);
     let reasoning = serde_json::from_value(json!({
         "type": "event_msg",
         "payload": {"type": "agent_reasoning", "text": "summary"}
@@ -427,6 +433,22 @@ async fn migration_projects_explicit_and_implicit_legacy_completed_items() {
         "payload": {"type": "agent_reasoning_raw_content", "text": "raw"}
     }))
     .expect("build legacy reasoning content");
+    let child_id = ThreadId::new();
+    let [old_activity, activity] = [None, Some("gpt-5")].map(|model| {
+        let mut payload = json!({
+            "type": "sub_agent_activity",
+            "event_id": if model.is_some() { "spawn" } else { "old-spawn" },
+            "kind": "started",
+            "agent_thread_id": child_id,
+            "agent_path": "/root/worker",
+        });
+        if let Some(model) = model {
+            payload["model"] = json!(model);
+            payload["reasoning_effort"] = json!("high");
+        }
+        serde_json::from_value(json!({"type": "event_msg", "payload": payload}))
+            .expect("build legacy activity")
+    });
     write_rollout(
         home.path(),
         thread_id,
@@ -434,6 +456,8 @@ async fn migration_projects_explicit_and_implicit_legacy_completed_items() {
         vec![
             started("explicit"),
             exec,
+            old_activity,
+            activity,
             completed("explicit"),
             reasoning,
             raw_reasoning,
@@ -451,10 +475,11 @@ async fn migration_projects_explicit_and_implicit_legacy_completed_items() {
     assert_eq!(turns.turns[0].turn_id, "explicit");
     let items = store
         .list_items(ListItemsParams {
+            item_ids: None,
             thread_id,
             turn_id: None,
             include_archived: false,
-            cursor: None,
+            position: None,
             page_size: 10,
             sort_direction: SortDirection::Asc,
             sort_key: ItemSortKey::CreatedAtOrdinal,
@@ -462,17 +487,39 @@ async fn migration_projects_explicit_and_implicit_legacy_completed_items() {
         })
         .await
         .expect("read projected items");
-    assert_eq!(items.items.len(), 2);
+    assert_eq!(items.items.len(), 4);
     assert_eq!(items.items[0].turn_id, "explicit");
-    assert_eq!(items.items[1].turn_id, turns.turns[1].turn_id);
+    assert_eq!(items.items[3].turn_id, turns.turns[1].turn_id);
     let command: serde_json::Value =
         serde_json::from_slice(&items.items[0].item_json).expect("parse projected command");
     let reasoning: serde_json::Value =
-        serde_json::from_slice(&items.items[1].item_json).expect("parse projected reasoning");
+        serde_json::from_slice(&items.items[3].item_json).expect("parse projected reasoning");
     assert_eq!(command["type"], "commandExecution");
+    let aggregated_output = command["aggregatedOutput"]
+        .as_str()
+        .expect("migrated command output");
+    assert_eq!(aggregated_output.len(), 64 * 1024);
+    assert!(aggregated_output.starts_with("head\n"));
+    assert!(aggregated_output.ends_with("\ntail"));
+    assert!(aggregated_output.contains("command output truncated for persistence"));
     assert_eq!(reasoning["type"], "reasoning");
     assert_eq!(reasoning["summary"], json!(["summary"]));
     assert_eq!(reasoning["content"], json!(["raw"]));
+    for (item, model) in items.items[1..3].iter().zip([None, Some("gpt-5")]) {
+        assert_eq!(item.turn_id, "explicit");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&item.item_json).unwrap(),
+            json!({
+                "type": "subAgentActivity",
+                "id": if model.is_some() { "spawn" } else { "old-spawn" },
+                "kind": "started",
+                "agentThreadId": child_id,
+                "agentPath": "/root/worker",
+                "model": model,
+                "reasoningEffort": model.map(|_| "high"),
+            })
+        );
+    }
 }
 
 #[tokio::test]
@@ -546,7 +593,7 @@ async fn migration_keeps_late_completions_in_their_original_turn() {
             user_message("old question"),
             started("current"),
             user_message("current question"),
-            exec_completion("old", "call-old"),
+            exec_completion("old", "call-old", "ok"),
             serde_json::from_value(json!({
                 "type": "event_msg",
                 "payload": {
@@ -581,10 +628,11 @@ async fn migration_keeps_late_completions_in_their_original_turn() {
 
     let items = store
         .list_items(ListItemsParams {
+            item_ids: None,
             thread_id,
             turn_id: None,
             include_archived: false,
-            cursor: None,
+            position: None,
             page_size: 10,
             sort_direction: SortDirection::Asc,
             sort_key: ItemSortKey::CreatedAtOrdinal,
@@ -889,6 +937,8 @@ async fn migration_coalesces_response_first_user_message_rollback_boundary() {
     let thread_id = ThreadId::new();
     let file_id = "file_123".to_string();
     let response = ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "user".to_string(),
         content: vec![
@@ -987,9 +1037,9 @@ async fn migration_keeps_late_completions_for_surviving_turns_across_rollback() 
             started("remove"),
             user_message("remove question"),
             completed("old"),
-            exec_completion("old", "call-old"),
+            exec_completion("old", "call-old", "ok"),
             item_completed("old", "reason-old"),
-            exec_completion("remove", "call-remove"),
+            exec_completion("remove", "call-remove", "ok"),
             completed("remove"),
             RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
                 num_turns: 1,
@@ -1061,10 +1111,11 @@ async fn migration_keeps_late_completions_for_surviving_turns_across_rollback() 
     );
     let items = store
         .list_items(ListItemsParams {
+            item_ids: None,
             thread_id,
             turn_id: None,
             include_archived: false,
-            cursor: None,
+            position: None,
             page_size: 20,
             sort_direction: SortDirection::Asc,
             sort_key: ItemSortKey::CreatedAtOrdinal,
@@ -1136,9 +1187,13 @@ async fn migration_rolls_back_pre_compaction_turns_from_sqlite_history() {
     let RolloutItem::Compacted(mut checkpoint) = compacted(vec![
         input_response_message("user", "old question"),
         ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "assistant".to_string(),
             content: vec![ContentItem::OutputText {
+                annotations: None,
+                logprobs: None,
                 text: "old answer".to_string(),
             }],
             phase: None,
@@ -1321,6 +1376,227 @@ async fn migration_preserves_answers_before_a_rolled_back_steer() {
     );
 }
 
+fn delivery(turn_id: &str, message_id: &str, text: &str, order: u64) -> RetainedContextEvent {
+    serde_json::from_value(json!({
+        "type": "delivered_assistant_message", "turn_id": turn_id,
+        "message_id": message_id, "text": text, "complete": true,
+        "acceptance_order": order
+    }))
+    .expect("nested delivery")
+}
+
+fn ordered_response(item: ResponseItem, order: u64) -> RolloutItem {
+    let mut envelope = codex_rollout::ResponseItemEnvelope::new(item);
+    envelope.metadata.get_or_insert_default().user_input_order = Some(order);
+    RolloutItem::ResponseItem(envelope)
+}
+
+fn worker_communication(text: &str) -> InterAgentCommunication {
+    InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::root().join("worker").expect("worker path"),
+        Vec::new(),
+        text.to_owned(),
+        /*trigger_turn*/ true,
+    )
+}
+
+async fn migrate_after_rollback(mut items: Vec<RolloutItem>) -> Vec<RolloutItem> {
+    items.push(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
+        ThreadRolledBackEvent { num_turns: 1 },
+    )));
+    let home = TempDir::new().expect("create Codex home");
+    let path = write_rollout(home.path(), ThreadId::new(), SessionSource::Cli, items);
+    indexed_store(home.path())
+        .await
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate rollout after rollback");
+    read_rollout(&path)
+        .into_iter()
+        .map(|line| line.item)
+        .collect()
+}
+
+fn retained_deliveries(items: &[RolloutItem]) -> Vec<&RetainedContextEvent> {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            RolloutItem::RetainedContext(
+                event @ RetainedContextEvent::DeliveredAssistantMessage { .. },
+            ) => Some(event),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn migration_rolls_back_nested_deliveries_by_acceptance_order() {
+    let [initial, steer] = ["initial", "steer"].map(|text| {
+        let mut item = input_response_message("user", text);
+        item.set_turn_id_if_missing("shared-turn");
+        item
+    });
+    let deliveries = [("exec:0", "first", 1), ("exec:1", "second", 3)]
+        .map(|(message_id, text, order)| delivery("shared-turn", message_id, text, order));
+    let RolloutItem::Compacted(mut checkpoint) = compacted(vec![initial.clone(), steer.clone()])
+    else {
+        unreachable!("compacted helper creates a checkpoint");
+    };
+    let context = checkpoint.retained_context.insert(Default::default());
+    for (text, order) in [("initial", 0), ("steer", 2)] {
+        context.record_user_message(
+            serde_json::from_value(json!({
+                "turn_id": "shared-turn", "message_id": text, "text": text, "complete": true
+            }))
+            .expect("retained instruction"),
+            codex_rollout::RetainedInputSource::Local(Some(order)),
+        );
+    }
+    context.record(&deliveries[0]);
+    let first_retained_message =
+        serde_json::to_value(&*context).expect("retained context")["assistant_messages"][0].clone();
+    context.record(&deliveries[1]);
+    let outer_call = serde_json::from_value(json!({
+        "type": "function_call", "call_id": "exec", "name": "exec", "arguments": "{}"
+    }))
+    .expect("outer code-mode call");
+    let migrated = migrate_after_rollback(vec![
+        started("shared-turn"),
+        ordered_response(initial, /*order*/ 0),
+        user_message("initial"),
+        rollout_response_item(outer_call),
+        RolloutItem::RetainedContext(deliveries[1].clone()),
+        ordered_response(steer, /*order*/ 2),
+        user_message("steer"),
+        RolloutItem::RetainedContext(deliveries[0].clone()),
+        completed("shared-turn"),
+        started("compaction-turn"),
+        RolloutItem::Compacted(checkpoint),
+        completed("compaction-turn"),
+    ])
+    .await;
+    let retained = migrated.iter().find_map(|item| match item {
+        RolloutItem::Compacted(checkpoint) => checkpoint.retained_context.as_ref(),
+        _ => None,
+    });
+    assert_eq!(retained_deliveries(&migrated), [&deliveries[0]]);
+    assert_eq!(
+        serde_json::to_value(retained.expect("retained checkpoint")).expect("retained context")["assistant_messages"],
+        json!([first_retained_message])
+    );
+}
+
+#[tokio::test]
+async fn migration_keeps_delivery_before_newer_unsequenced_communication() {
+    let mut initial = input_response_message("user", "initial");
+    initial.set_turn_id_if_missing("root-turn");
+    let delivery = delivery("root-turn", "exec:0", "May I publish?", /*order*/ 1);
+    let migrated = migrate_after_rollback(vec![
+        started("root-turn"),
+        ordered_response(initial, /*order*/ 0),
+        user_message("initial"),
+        RolloutItem::InterAgentCommunication(worker_communication("later communication")),
+        RolloutItem::RetainedContext(delivery.clone()),
+    ])
+    .await;
+    assert_eq!(retained_deliveries(&migrated), [&delivery]);
+}
+
+#[tokio::test]
+async fn migration_removes_delivery_from_rolled_back_communication_turn() {
+    for encoding in [
+        "standalone",
+        "unsequenced pair",
+        "sequenced pair",
+        "sequenced same turn",
+    ] {
+        let communication = worker_communication("start communication turn");
+        let mut items = vec![
+            started("root-turn"),
+            ordered_response(input_response_message("user", "initial"), /*order*/ 0),
+            user_message("initial"),
+        ];
+        let delivery_turn = if encoding == "sequenced same turn" {
+            "root-turn"
+        } else {
+            items.extend([completed("root-turn"), started("communication-turn")]);
+            "communication-turn"
+        };
+        if encoding == "standalone" {
+            items.push(RolloutItem::InterAgentCommunication(communication));
+        } else {
+            let response = communication.to_model_input_item();
+            let response = if encoding.starts_with("sequenced") {
+                ordered_response(response, /*order*/ 1)
+            } else {
+                rollout_response_item(response)
+            };
+            items.extend([
+                RolloutItem::InterAgentCommunicationMetadata { trigger_turn: true },
+                response,
+            ]);
+        }
+        let delivery = delivery(delivery_turn, "exec:0", "May I publish?", /*order*/ 2);
+        items.extend([
+            RolloutItem::RetainedContext(delivery),
+            completed(delivery_turn),
+        ]);
+        assert!(
+            retained_deliveries(&migrate_after_rollback(items).await).is_empty(),
+            "{encoding}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn migration_removes_delivery_with_only_legacy_unsequenced_instruction() {
+    let delivery = delivery("legacy-turn", "exec:0", "May I publish?", /*order*/ 1);
+    let migrated = migrate_after_rollback(vec![
+        started("legacy-turn"),
+        rollout_response_item(input_response_message("user", "legacy instruction")),
+        user_message("legacy instruction"),
+        RolloutItem::RetainedContext(delivery),
+    ])
+    .await;
+    assert!(retained_deliveries(&migrated).is_empty());
+}
+
+#[tokio::test]
+async fn migration_keeps_downgraded_delivery_before_later_same_turn_steer() {
+    let delivery = delivery("shared-turn", "exec:0", "May I publish?", /*order*/ 1);
+    let mut legacy_wire = serde_json::to_value(RolloutItem::RetainedContext(delivery))
+        .expect("compatible response-item encoding");
+    // Older readers preserve the assistant response but drop this new metadata field.
+    legacy_wire["metadata"]
+        .as_object_mut()
+        .expect("response-item metadata")
+        .remove("delivered_assistant_message");
+    let old_read: RolloutItem = serde_json::from_value(legacy_wire).expect("older response item");
+    assert!(matches!(old_read, RolloutItem::ResponseItem(_)));
+    let [initial, steer] = ["initial", "steer"].map(|text| {
+        let mut item = input_response_message("user", text);
+        item.set_turn_id_if_missing("shared-turn");
+        item
+    });
+    let migrated = migrate_after_rollback(vec![
+        started("shared-turn"),
+        ordered_response(initial, /*order*/ 0),
+        user_message("initial"),
+        old_read,
+        ordered_response(steer, /*order*/ 2),
+        user_message("steer"),
+    ])
+    .await;
+    assert!(migrated.into_iter().any(|item| matches!(item,
+        RolloutItem::ResponseItem(envelope)
+            if matches!(&envelope.item, ResponseItem::Message { role, content, .. }
+                if role == "assistant"
+                    && matches!(content.as_slice(), [ContentItem::OutputText { text , .. }]
+                        if text == "May I publish?"))
+    )));
+}
+
 #[tokio::test]
 async fn migration_preserves_reverse_replay_anchor_after_pre_compaction_rollback() {
     let home = TempDir::new().expect("create Codex home");
@@ -1372,6 +1648,8 @@ async fn assert_migrated_evidence_order(steer_order: Option<u64>) {
     let thread_id = ThreadId::new();
     let [initial, steer] =
         [("initial", INITIAL), ("steer", STEER)].map(|(id, text)| ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: Some(ResponseItemId::with_suffix("msg", id)),
             role: "user".to_owned(),
             content: vec![ContentItem::InputText {
@@ -1399,7 +1677,8 @@ async fn assert_migrated_evidence_order(steer_order: Option<u64>) {
             {"order": if steer_order.is_some() { 2 } else { 1 }, "turn_id": "shared-turn", "call_id": "before", "questions": [{"question": "Publish?", "answer": "Only privately."}]},
             {"order": 3, "turn_id": "shared-turn", "call_id": "after", "questions": [{"question": "Publish the README?", "answer": "Do not publish it."}]}
         ],
-        "incomplete": false, "user_messages_incomplete": false, "next_order": 4
+        "incomplete": false, "user_messages_incomplete": false, "next_order": 4,
+        "assistant_messages": [], "assistant_messages_incomplete": true
     });
     checkpoint.retained_context =
         Some(serde_json::from_value(retained.clone()).expect("retained fixture"));
@@ -1456,6 +1735,18 @@ async fn assert_migrated_evidence_order(steer_order: Option<u64>) {
             rollout_response_item(initial.clone()),
             user_message(INITIAL),
             RolloutItem::RetainedContext(answers[0].clone()),
+            RolloutItem::ResponseItem(codex_rollout::ResponseItemEnvelope {
+                item: serde_json::from_value(json!({
+                    "type": "message", "id": "late-assistant", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Late assistant question?"}],
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "shared-turn"}
+                }))
+                .expect("assistant message"),
+                metadata: Some(
+                    serde_json::from_value(json!({"user_input_order": 2}))
+                        .expect("assistant order"),
+                ),
+            }),
             RolloutItem::Compacted(before_steer),
             RolloutItem::ResponseItem(codex_rollout::ResponseItemEnvelope {
                 item: steer,
@@ -1487,6 +1778,13 @@ async fn assert_migrated_evidence_order(steer_order: Option<u64>) {
         .await
         .expect("migrate same-turn rollback");
     let migrated = read_rollout(&path);
+    assert_eq!(
+        migrated.iter().any(|line| matches!(&line.item,
+            RolloutItem::ResponseItem(envelope)
+                if envelope.item.id().is_some_and(|id| id.as_str() == "late-assistant")
+        )),
+        steer_order.is_none()
+    );
     let checkpoints = migrated
         .iter()
         .filter_map(|line| match &line.item {
@@ -1790,6 +2088,8 @@ async fn migration_compacts_subagent_prefix_and_does_not_project_it() {
                 message: "latest checkpoint".to_string(),
                 replacement_history: Some(vec![
                     ResponseItem::Message {
+                        encrypted_content: None,
+                        status: None,
                         id: None,
                         role: "user".to_string(),
                         content: vec![ContentItem::InputText {
@@ -1817,26 +2117,20 @@ async fn migration_compacts_subagent_prefix_and_does_not_project_it() {
                 root_turn_id: None,
                 disabled_plugin_ids: None,
                 cwd: serde_json::from_value(json!(home.path())).expect("absolute cwd"),
-                workspace_roots: None,
-                current_date: None,
-                timezone: None,
                 approval_policy: AskForApproval::Never,
                 approvals_reviewer: None,
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
                 permission_profile: None,
                 active_permission_profile: None,
-                network: None,
                 file_system_sandbox_policy: None,
                 model: "test-model".to_string(),
                 comp_hash: None,
-                personality: None,
                 collaboration_mode: None,
                 multi_agent_version: None,
-                multi_agent_mode: None,
                 realtime_active: None,
                 cyber_access_program: None,
                 effort: None,
-                summary: ReasoningSummary::Auto,
+                summary: Some(ReasoningSummary::Auto),
             }),
             user_message("child question"),
             agent_message("child answer"),
