@@ -411,11 +411,13 @@ async fn reconnect_daemon_command_center_after_socket_replacement_without_a_conv
                 "daemon_command_center_vanished_rename",
                 render_bottom_popup(&app.chat_widget, /*width*/ 100)
             );
-            app.handle_tui_event(
+            // Build the nested input future outside this large reconnect test's poll
+            // frame; plain Box::pin still constructs its temporary on that stack.
+            boxed_future!(app.handle_tui_event(
                 &mut tui,
                 &mut session,
                 TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            )
+            ))
             .await?;
             assert!(
                 !std::iter::from_fn(|| events.try_recv().ok())

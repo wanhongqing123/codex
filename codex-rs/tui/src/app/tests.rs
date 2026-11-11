@@ -4140,15 +4140,22 @@ async fn reopen_saved_side_chat(during: DuringOpen) -> Result<()> {
 
 #[tokio::test]
 async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()> {
-    assert_side_creation_preserves_entry_point(/*auto_return_on_turn_complete*/ false).await
+    boxed_future!(assert_side_creation_preserves_entry_point(
+        /*auto_return_on_turn_complete*/ false
+    ))
+    .await
 }
 
 #[tokio::test]
 async fn remote_im_side_creation_preserves_auto_return_before_thread_started() -> Result<()> {
-    assert_side_creation_preserves_entry_point(/*auto_return_on_turn_complete*/ true).await
+    boxed_future!(assert_side_creation_preserves_entry_point(
+        /*auto_return_on_turn_complete*/ true
+    ))
+    .await
 }
 
-// Exercise the same asynchronous upstream fork under interactive and IM entry points.
+// Exercise both entry points without nesting the large fixture future in the
+// wrapper poll frame. Keep the existing thread stack budget on Windows and Unix.
 async fn assert_side_creation_preserves_entry_point(
     auto_return_on_turn_complete: bool,
 ) -> Result<()> {

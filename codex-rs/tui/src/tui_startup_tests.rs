@@ -70,6 +70,9 @@ fn startup_preserves_typeahead_and_discards_buffered_action_key_after_first_draw
         .arg(STARTUP_INPUT_CHILD_TEST)
         .arg("--ignored")
         .arg("--nocapture")
+        // This PTY emulates VT/Kitty input. A caller using TERM=dumb for
+        // deterministic snapshots must not disable the child's terminal negotiation.
+        .env("TERM", "xterm-256color")
         .env("CODEX_TUI_STARTUP_INPUT_PTY_DIR", signals.path())
         .stdin(Stdio::from(slave.try_clone().expect("clone pty slave")))
         .stdout(Stdio::from(slave))
