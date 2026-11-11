@@ -1,15 +1,18 @@
 //! Async questions are completed messages, not completed turns. Exercise the
 //! live notification path through the real IM payload construction boundary.
+//! Fixtures carry upstream lifecycle envelopes without inventing timing metadata.
 
 use super::*;
 use crate::multi_ai_code_im_bridge::test_capture::Capture;
+use codex_app_server_protocol::ThreadItem;
 use codex_protocol::items::AgentMessageDelivery;
 use codex_protocol::items::AsyncUserInputQuestion;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 
-fn async_question() -> AppServerThreadItem {
-    AppServerThreadItem::AgentMessage {
+fn async_question() -> AppServerThreadItemPayload {
+    AppServerThreadItemPayload::AgentMessage {
+        moderation: None,
         id: "call-async-question".to_string(),
         text: "Which issue?\n- Issue A\n- Issue B\n\nAny other constraint?".to_string(),
         phase: Some(MessagePhase::FinalAnswer),
@@ -28,13 +31,18 @@ fn async_question() -> AppServerThreadItem {
     }
 }
 
-fn deliver(chat: &mut ChatWidget, item: AppServerThreadItem, replay_kind: Option<ReplayKind>) {
+fn deliver(
+    chat: &mut ChatWidget,
+    item: AppServerThreadItemPayload,
+    replay_kind: Option<ReplayKind>,
+) {
     chat.handle_server_notification(
         ServerNotification::ItemCompleted(ItemCompletedNotification {
+            content_token_count: None,
             thread_id: "thread-1".to_string(),
             turn_id: "turn-1".to_string(),
             completed_at_ms: 0,
-            item,
+            item: ThreadItem::untimed(item),
         }),
         replay_kind,
     );
@@ -75,7 +83,7 @@ async fn remote_im_async_question_is_sent_immediately_without_ending_the_route()
     assert_eq!(chat.remote_im_active_task_id.as_deref(), Some("task-a"));
 
     let mut answer = async_question();
-    if let AppServerThreadItem::AgentMessage {
+    if let AppServerThreadItemPayload::AgentMessage {
         id,
         text,
         phase,
@@ -101,7 +109,7 @@ async fn remote_im_async_question_is_sent_immediately_without_ending_the_route()
             "commentary-after-question".to_string()
         )]
     );
-    if let AppServerThreadItem::AgentMessage {
+    if let AppServerThreadItemPayload::AgentMessage {
         id, text, phase, ..
     } = &mut answer
     {
@@ -125,7 +133,10 @@ async fn remote_im_async_question_is_sent_immediately_without_ending_the_route()
         /*duration_ms*/ None,
         /*error*/ None,
     );
-    turn.items = vec![async_question(), answer];
+    turn.items = vec![async_question(), answer]
+        .into_iter()
+        .map(ThreadItem::untimed)
+        .collect();
     chat.handle_server_notification(
         ServerNotification::TurnCompleted(TurnCompletedNotification {
             thread_id: "thread-1".to_string(),
@@ -172,7 +183,8 @@ async fn remote_im_all_answers_are_ordinary_messages_and_idle_does_not_stop_forw
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     bind_source_route(&mut chat);
     let capture = Capture::start();
-    let answer = |id: &str, text: &str| AppServerThreadItem::AgentMessage {
+    let answer = |id: &str, text: &str| AppServerThreadItemPayload::AgentMessage {
+        moderation: None,
         id: id.to_string(),
         text: text.to_string(),
         phase: Some(MessagePhase::FinalAnswer),
@@ -204,7 +216,10 @@ async fn remote_im_all_answers_are_ordinary_messages_and_idle_does_not_stop_forw
         /*duration_ms*/ None,
         /*error*/ None,
     );
-    turn.items = vec![first, last];
+    turn.items = vec![first, last]
+        .into_iter()
+        .map(ThreadItem::untimed)
+        .collect();
     chat.handle_server_notification(
         ServerNotification::TurnCompleted(TurnCompletedNotification {
             thread_id: "thread-1".to_string(),

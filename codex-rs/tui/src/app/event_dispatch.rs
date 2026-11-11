@@ -1478,6 +1478,11 @@ impl App {
                 self.insert_pending_usage_output_after_stream_shutdown(tui);
             }
             AppEvent::CorrectFlushedAgentMessage { item, cell } => {
+                // Upstream corrects interrupted fragments outside the normal completion
+                // event. Retain the same message-ID diagnostics for this replacement path.
+                let source_length = cell.copy_source().map_or(/*default*/ 0, str::len);
+                let outcome;
+                let replaced_cells;
                 let belongs_to_item = |cell: &Arc<dyn HistoryCell>| {
                     cell.as_any().downcast_ref::<history_cell::AgentMarkdownCell>().is_some_and(|cell| cell.interrupted_item.as_ref() == Some(&item))
                 };
@@ -1492,9 +1497,17 @@ impl App {
                         }
                     }
                     self.replace_agent_message(tui, index..index + 1, cell, crate::app_event::ConsolidationScrollbackReflow::Required)?;
+                    outcome = "history_replaced";
+                    replaced_cells = 1;
                 } else {
                     self.insert_history_cell(tui, Box::new(cell));
+                    outcome = "history_inserted";
+                    replaced_cells = 0;
                 }
+                tracing::info!(target: "codex_tui::history_diagnostics", "tui_history {}", serde_json::json!({
+                    "event": "tui_history", "stage": outcome, "messageId": item.1,
+                    "textLength": source_length, "cellCount": self.transcript_cells.len(), "replacedCells": replaced_cells
+                }));
             }
             AppEvent::ConsolidateProposedPlan(source) => {
                 let end = self.transcript_cells.len();

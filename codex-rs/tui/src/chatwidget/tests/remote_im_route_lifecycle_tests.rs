@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::multi_ai_code_im_bridge::test_capture::Capture;
+use codex_app_server_protocol::ThreadItem;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 
@@ -11,14 +12,17 @@ fn complete_remote_turn(chat: &mut ChatWidget, turn_id: &str, status: AppServerT
         turn_id, status, /*duration_ms*/ None, /*error*/ None,
     );
     if matches!(turn.status, AppServerTurnStatus::Completed) {
-        turn.items.push(AppServerThreadItem::AgentMessage {
-            id: format!("{turn_id}-answer"),
-            text: "Finished this request.".to_string(),
-            phase: Some(MessagePhase::FinalAnswer),
-            memory_citation: None,
-            delivery: None,
-            questions: None,
-        });
+        turn.items.push(ThreadItem::untimed(
+            AppServerThreadItemPayload::AgentMessage {
+                moderation: None,
+                id: format!("{turn_id}-answer"),
+                text: "Finished this request.".to_string(),
+                phase: Some(MessagePhase::FinalAnswer),
+                memory_citation: None,
+                delivery: None,
+                questions: None,
+            },
+        ));
     }
     chat.handle_server_notification(
         ServerNotification::TurnCompleted(TurnCompletedNotification {
@@ -123,17 +127,18 @@ async fn completed_source_route_is_not_reused_by_machine_turn_before_human_steer
     .unwrap();
     chat.handle_server_notification(
         ServerNotification::ItemCompleted(ItemCompletedNotification {
+            content_token_count: None,
             thread_id: chat.thread_id.map(|id| id.to_string()).unwrap_or_default(),
             turn_id: "turn-2".to_string(),
             completed_at_ms: 0,
-            item: AppServerThreadItem::UserMessage {
+            item: ThreadItem::untimed(AppServerThreadItemPayload::UserMessage {
                 id: "user-b".to_string(),
                 client_id: None,
                 content: vec![UserInput::Text {
                     text: next_prompt.to_string(),
                     text_elements: Vec::new(),
                 }],
-            },
+            }),
         }),
         /*replay_kind*/ None,
     );

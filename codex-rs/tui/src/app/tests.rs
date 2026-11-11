@@ -4138,10 +4138,18 @@ async fn reopen_saved_side_chat(during: DuringOpen) -> Result<()> {
     Ok(())
 }
 
-#[test_case::test_case(false; "interactive side chat")]
-#[test_case::test_case(true; "remote IM side chat")]
 #[tokio::test]
-async fn handle_start_side_seeds_navigation_before_thread_started(
+async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()> {
+    assert_side_creation_preserves_entry_point(/*auto_return_on_turn_complete*/ false).await
+}
+
+#[tokio::test]
+async fn remote_im_side_creation_preserves_auto_return_before_thread_started() -> Result<()> {
+    assert_side_creation_preserves_entry_point(/*auto_return_on_turn_complete*/ true).await
+}
+
+// Exercise the same asynchronous upstream fork under interactive and IM entry points.
+async fn assert_side_creation_preserves_entry_point(
     auto_return_on_turn_complete: bool,
 ) -> Result<()> {
     let (mut app, mut app_event_rx, mut op_rx) = make_test_app_with_channels().await;

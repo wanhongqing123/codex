@@ -24,6 +24,8 @@ doctest = false
 #
 # 要恢复：把下面两段注释解开，同时撤销 config/src/types.rs 里的拒绝，
 # 并把主仓 scripts/build-aicli-codex.mjs 里对应两项的 bundled 改回 true。
+# 上游 tests/helper_manifest.rs 只验证被移除的 setup.exe，也随之移除；
+# 若重新启用 elevated，需要同时恢复该产物测试，现有库内 helper 测试保持启用。
 #
 # [[bin]]
 # name = "codex-windows-sandbox-setup"

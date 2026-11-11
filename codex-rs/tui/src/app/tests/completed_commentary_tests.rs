@@ -21,6 +21,7 @@ async fn authoritative_commentary_survives_empty_stream_and_keeps_surrounding_hi
         let response = "最新基线仍为主仓 `3361f3c501`、core `8d13788497`。";
         app.chat_widget.handle_server_notification(
             ServerNotification::ItemCompleted(codex_app_server_protocol::ItemCompletedNotification {
+            content_token_count: None,
                 thread_id: thread_id.to_string(),
                 turn_id: "turn-1".to_string(),
                 completed_at_ms: 0,
@@ -35,24 +36,33 @@ async fn authoritative_commentary_survives_empty_stream_and_keeps_surrounding_hi
                 AppEvent::InsertHistoryCell(cell) => app.insert_history_cell(&mut tui, cell),
                 AppEvent::ConsolidateAgentMessage {
                     message_id,
+                    phase,
+                    interrupted_item,
                     source,
                     copy_source,
                     cwd,
                     inline_visualization_context,
                     scrollback_reflow,
                     deferred_history_cell,
-                } => app.handle_consolidate_agent_message(
-                    &mut tui,
-                    message_id,
-                    history_cell::AgentMarkdownCell::new_with_inline_visualizations(
+                } => {
+                    // Match the production event boundary, including upstream phase
+                    // and interruption metadata on the consolidated source cell.
+                    let mut cell = history_cell::AgentMarkdownCell::new_with_inline_visualizations(
                         source,
                         &cwd,
                         inline_visualization_context,
                     )
-                    .with_copy_source(copy_source),
-                    scrollback_reflow,
-                    deferred_history_cell,
-                )?,
+                    .with_copy_source(copy_source);
+                    cell.phase = phase;
+                    cell.interrupted_item = interrupted_item;
+                    app.handle_consolidate_agent_message(
+                        &mut tui,
+                        message_id,
+                        cell,
+                        scrollback_reflow,
+                        deferred_history_cell,
+                    )?;
+                }
                 _ => {}
             }
         }

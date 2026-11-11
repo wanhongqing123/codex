@@ -16,6 +16,7 @@ async fn program_status_tracks_live_results_and_resolved_approvals() {
         &mut chat,
         "status-approval",
         ExecApprovalRequestEvent {
+            raw_command: None,
             kind: Default::default(),
             call_id: "status-call".to_string(),
             approval_id: Some("status-call".to_string()),

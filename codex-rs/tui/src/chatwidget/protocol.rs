@@ -554,8 +554,9 @@ impl ChatWidget {
                 }
                 // Forward each user-visible item uniformly. This also recovers an
                 // item missing from the live stream; item IDs suppress duplicates.
-                for item in &notification.turn.items {
-                    if let ThreadItem::AgentMessage { id, text, .. } = item {
+                // Read payloads through the upstream iterator, not the transport envelope.
+                for item in notification.turn.item_payloads() {
+                    if let ThreadItemPayload::AgentMessage { id, text, .. } = item {
                         self.forward_remote_im_text_item(
                             &completed_turn_id,
                             id,
@@ -571,8 +572,8 @@ impl ChatWidget {
                     && let Some(route) = self.remote_im_route_for_turn(&completed_turn_id)
                 {
                     if let Some((id, text)) =
-                        notification.turn.items.iter().rev().find_map(|item| {
-                            if let ThreadItem::AgentMessage { id, text, .. } = item {
+                        notification.turn.item_payloads().rev().find_map(|item| {
+                            if let ThreadItemPayload::AgentMessage { id, text, .. } = item {
                                 Some((id, text))
                             } else {
                                 None
@@ -772,14 +773,14 @@ impl ChatWidget {
         replay_kind: Option<ReplayKind>,
     ) {
         let reports_tool_activity = matches!(
-            &notification.item,
-            ThreadItem::CommandExecution { .. }
-                | ThreadItem::FileChange { .. }
-                | ThreadItem::McpToolCall { .. }
-                | ThreadItem::DynamicToolCall { .. }
-                | ThreadItem::WebSearch(_)
-                | ThreadItem::ImageGeneration(_)
-                | ThreadItem::CollabAgentToolCall { .. }
+            &notification.item.payload,
+            ThreadItemPayload::CommandExecution { .. }
+                | ThreadItemPayload::FileChange { .. }
+                | ThreadItemPayload::McpToolCall { .. }
+                | ThreadItemPayload::DynamicToolCall { .. }
+                | ThreadItemPayload::WebSearch(_)
+                | ThreadItemPayload::ImageGeneration(_)
+                | ThreadItemPayload::CollabAgentToolCall { .. }
         );
         if replay_kind.is_none()
             && self.remote_im_forwarding_active
@@ -915,14 +916,14 @@ impl ChatWidget {
         replay_kind: Option<ReplayKind>,
     ) {
         let reports_tool_activity = matches!(
-            &notification.item,
-            ThreadItem::CommandExecution { .. }
-                | ThreadItem::FileChange { .. }
-                | ThreadItem::McpToolCall { .. }
-                | ThreadItem::DynamicToolCall { .. }
-                | ThreadItem::WebSearch(_)
-                | ThreadItem::ImageGeneration(_)
-                | ThreadItem::CollabAgentToolCall { .. }
+            &notification.item.payload,
+            ThreadItemPayload::CommandExecution { .. }
+                | ThreadItemPayload::FileChange { .. }
+                | ThreadItemPayload::McpToolCall { .. }
+                | ThreadItemPayload::DynamicToolCall { .. }
+                | ThreadItemPayload::WebSearch(_)
+                | ThreadItemPayload::ImageGeneration(_)
+                | ThreadItemPayload::CollabAgentToolCall { .. }
         );
         if replay_kind.is_none()
             && self.remote_im_forwarding_active

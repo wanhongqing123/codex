@@ -508,9 +508,10 @@ impl StatusHistoryCell {
         ])
     }
 
+    // Workspace has its own status row; shared account controls display only identity and plan.
     fn account_value(&self) -> Option<String> {
         self.account.as_ref().map(|account| match account {
-            StatusAccountDisplay::ChatGpt { email, plan } => match (email, plan) {
+            StatusAccountDisplay::ChatGpt { email, plan, .. } => match (email, plan) {
                 (Some(email), Some(plan)) => format!("{email} ({plan})"),
                 (Some(email), None) => email.clone(),
                 (None, Some(plan)) => plan.clone(),

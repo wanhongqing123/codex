@@ -311,6 +311,7 @@ async fn remote_im_btw_uses_plain_task_with_structured_correlation() {
             parent_thread_id: emitted_parent_thread_id,
             auto_return_on_turn_complete: true,
             user_message: Some(user_message),
+            mode: crate::app_event::SideStartMode::New,
         }) => {
             assert_eq!(emitted_parent_thread_id, parent_thread_id);
             assert_eq!(user_message.text, "检查最近一次失败日志");
