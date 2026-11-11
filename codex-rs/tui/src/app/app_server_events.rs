@@ -26,7 +26,7 @@ use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::SessionSource;
-use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::ThreadReadParams;
 use codex_app_server_protocol::ThreadReadResponse;
 use codex_app_server_protocol::ThreadSource;
@@ -64,34 +64,6 @@ impl App {
         }
     }
 
-    pub(super) fn refresh_mcp_startup_expected_servers_from_config(&mut self) {
-        if self
-            .current_displayed_thread_id()
-            .zip(self.primary_thread_id)
-            .is_some_and(|(thread_id, primary_thread_id)| {
-                self.agent_navigation.is_parent_owned(thread_id)
-                    || (thread_id != primary_thread_id
-                        && !self.side_threads.contains_key(&thread_id))
-            })
-        {
-            // Subagents can defer cached servers indefinitely, so only servers
-            // that actually report startup should keep their status running.
-            self.chat_widget
-                .set_mcp_startup_expected_servers(std::iter::empty());
-            return;
-        }
-
-        let enabled_config_mcp_servers: Vec<String> = self
-            .config
-            .mcp_servers
-            .get()
-            .iter()
-            .filter_map(|(name, server)| server.enabled.then_some(name.clone()))
-            .collect();
-        self.chat_widget
-            .set_mcp_startup_expected_servers(enabled_config_mcp_servers);
-    }
-
     pub(super) async fn handle_app_server_event(
         &mut self,
         app_server_client: &AppServerSession,
@@ -103,7 +75,6 @@ impl App {
                     skipped,
                     "app-server event consumer lagged; dropping ignored events"
                 );
-                self.refresh_mcp_startup_expected_servers_from_config();
                 self.chat_widget.finish_mcp_startup_after_lag();
                 if let Some(task) = self.agents_overview.refresh_task.take() {
                     task.abort();
@@ -147,7 +118,20 @@ impl App {
                     .await;
                 self.repaint_agents_overview();
             }
+            AppServerEvent::ThreadStreamDisconnected(error) => {
+                self.handle_server_notification_event(
+                    app_server_client,
+                    ServerNotification::Error(*error),
+                )
+                .await;
+            }
             AppServerEvent::Disconnected { message } => {
+                // The request result distinguishes a refused start from a lost reply.
+                if self.pending_startup_thread_start
+                    && !matches!(self.app_server_target, crate::AppServerTarget::Embedded)
+                {
+                    return;
+                }
                 if self.begin_reconnect() {
                     return;
                 }
@@ -161,8 +145,18 @@ impl App {
     async fn handle_server_notification_event(
         &mut self,
         app_server_client: &AppServerSession,
-        notification: ServerNotification,
+        mut notification: ServerNotification,
     ) {
+        if let ServerNotification::TurnModerationMetadata(metadata) = &mut notification
+            && (!super::safety_recourse::supports_server(app_server_client)
+                || self
+                    .primary_thread_id
+                    .is_none_or(|id| id.to_string() != metadata.thread_id))
+            && let Some(metadata) = metadata.metadata.as_object_mut()
+        {
+            metadata.remove("safety_block");
+            metadata.remove("safety_recourse");
+        }
         // A picker can leave an old runtime's close notification queued while the same thread
         // is resumed. Thread IDs survive reloads, so confirm that the displayed thread is still
         // unloaded before routing a close that would exit the TUI or switch away from it.
@@ -233,8 +227,8 @@ impl App {
             return;
         }
         // Hidden helper threads must not enter visible thread routing or overview refreshes.
-        if let ServerNotificationThreadTarget::Thread(thread_id) =
-            server_notification_thread_target(&notification)
+        let target = server_notification_thread_target(&notification);
+        if let ServerNotificationThreadTarget::Thread(thread_id) = target
             && let Some(sender) = self.temporary_structured_requests.get(&thread_id)
         {
             if matches!(
@@ -327,9 +321,6 @@ impl App {
                                 || self.chat_widget.has_pending_protected_request();
                     }
                 }
-            }
-            ServerNotification::McpServerStatusUpdated(_) => {
-                self.refresh_mcp_startup_expected_servers_from_config();
             }
             ServerNotification::McpServerOauthLoginCompleted(notification) => {
                 // The start response identifies the new attempt. Hold completions until then
@@ -465,14 +456,22 @@ impl App {
             _ => {}
         }
 
-        match server_notification_thread_target(&notification) {
+        match target {
             ServerNotificationThreadTarget::Thread(thread_id) => {
+                if self.saved_openings.observe(
+                    app_server_client.backend_id(),
+                    thread_id,
+                    self.thread_event_channels.get(&thread_id),
+                    &notification,
+                ) {
+                    return;
+                }
                 if self.current_displayed_thread_id() != Some(thread_id)
                     && let ServerNotification::ItemCompleted(item) = &notification
-                    && let ThreadItem::UserMessage {
+                    && let ThreadItemPayload::UserMessage {
                         client_id: Some(client_id),
                         ..
-                    } = &item.item
+                    } = &item.item.payload
                 {
                     // Acknowledge by ID before routing can discard the receipt. ID-less receipts
                     // cannot safely distinguish identical pending submissions.
@@ -543,7 +542,8 @@ impl App {
 
         #[cfg(any(target_os = "windows", test))]
         if let ServerNotification::WindowsSandboxSetupCompleted(result) = notification {
-            let Some((mode, preset, profile_selection)) = self.windows_sandbox.pending_setup.take()
+            let Some((mode, preset, profile_selection)) =
+                self.windows_sandbox.pending_setup.clone()
             else {
                 return;
             };
@@ -556,7 +556,6 @@ impl App {
                 }
             };
             if result.mode != expected_mode {
-                self.windows_sandbox.pending_setup = Some((mode, preset, profile_selection));
                 return;
             }
             if result.success {
@@ -573,10 +572,18 @@ impl App {
                         profile_selection,
                     });
             } else {
+                self.windows_sandbox.pending_setup = None;
                 self.chat_widget.clear_windows_sandbox_setup_status();
                 self.windows_sandbox.setup_started_at = None;
-                self.chat_widget
-                    .retain_input_after_failed_permission_selection();
+                if self
+                    .chat_widget
+                    .recover_inline_permission_profile_selection()
+                {
+                    self.app_event_tx.send(AppEvent::SettingsSelectionClosed);
+                } else {
+                    self.chat_widget
+                        .retain_input_after_failed_permission_selection();
+                }
                 self.chat_widget.add_error_message(format!(
                     "Windows sandbox setup failed: {}",
                     result.error.unwrap_or_else(|| "unknown error".to_string())
@@ -612,9 +619,10 @@ impl App {
             return;
         }
         if let ServerRequest::DynamicToolCall { request_id, params } = &request {
+            let tui_tool = params.namespace.as_deref() == Some(crate::dynamic_tools::NAMESPACE);
+            // Another client may own this request on a shared server.
             if self.dynamic_tool_tasks.contains_key(request_id)
-                || (params.namespace.as_deref() != Some(crate::dynamic_tools::NAMESPACE)
-                    && !app_server_client.uses_embedded_app_server())
+                || (!tui_tool && !app_server_client.uses_embedded_app_server())
             {
                 return;
             }
@@ -625,7 +633,7 @@ impl App {
                     app_server_client.thread_tool_transport(),
                     crate::dynamic_tools_mcp::ThreadToolTransport::Mcp(_)
                 );
-            if app_server_client.uses_embedded_app_server()
+            if !tui_tool
                 || requires_mcp
                 || codex_protocol::ThreadId::from_string(&params.thread_id)
                     .is_ok_and(|thread_id| self.abandoned_side_threads.contains(&thread_id))
@@ -633,7 +641,7 @@ impl App {
                 let response = crate::dynamic_tools::failure_response(if requires_mcp {
                     "TUI task tools require the approval-gated MCP server"
                 } else {
-                    "TUI dynamic tools require an active external task"
+                    "TUI dynamic tools require an active task in the TUI namespace"
                 });
                 self.app_event_tx.send(AppEvent::DynamicToolCallCompleted {
                     request_id: request_id.clone(),

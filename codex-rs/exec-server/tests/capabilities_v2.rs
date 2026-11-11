@@ -6,10 +6,12 @@ use codex_exec_server::CAPABILITIES_DISCOVER_V2_METHOD;
 use codex_exec_server::DiscoverV2CapabilitiesRequest;
 use codex_exec_server::DiscoverV2CapabilitiesResponse;
 use codex_exec_server::InitializeResponse;
+use codex_exec_server::SkillDiscoveryRoot;
 use codex_exec_server_protocol::JSONRPCMessage;
 use codex_utils_path_uri::PathUri;
 use common::exec_server::ExecServerHarness;
 use common::exec_server::exec_server_with_env;
+use pretty_assertions::assert_eq;
 
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -71,6 +73,19 @@ async fn v2_rpc_refreshes_metadata_and_enforces_sandbox() -> anyhow::Result<()> 
             .iter()
             .any(|skill| skill.name == "demo" && skill.description == "original")
     );
+    let expected_root = Some(SkillDiscoveryRoot {
+        id: "codex-home-skills".to_string(),
+        path: PathUri::from_host_native_path(codex_home_path.join("skills"))?,
+    });
+    assert_eq!(
+        first
+            .skills
+            .iter()
+            .find(|skill| skill.name == "demo")
+            .context("demo skill")?
+            .discovery_root,
+        expected_root,
+    );
     assert!(!serde_json::to_string(&first)?.contains("PRIVATE INSTRUCTION BODY"));
 
     assert!(
@@ -131,7 +146,15 @@ async fn v2_rpc_refreshes_metadata_and_enforces_sandbox() -> anyhow::Result<()> 
         {
             let response = discover(&mut server, &restricted).await?;
             assert!(response.plugins.is_empty());
-            assert!(response.skills.iter().any(|skill| skill.name == "demo"));
+            assert_eq!(
+                response
+                    .skills
+                    .iter()
+                    .find(|skill| skill.name == "demo")
+                    .context("sandboxed demo skill")?
+                    .discovery_root,
+                expected_root,
+            );
             assert!(!serde_json::to_string(&response)?.contains("mail@market"));
         }
         // Windows restricted tokens reject split read access; a supported read-only policy succeeds.
@@ -146,10 +169,10 @@ async fn v2_rpc_refreshes_metadata_and_enforces_sandbox() -> anyhow::Result<()> 
                     .contains("cannot enforce split filesystem read restrictions")),
                 "{error:#}"
             );
-            let mut sandbox = FileSystemSandboxContext::from_legacy_sandbox_policy(
-                codex_protocol::protocol::SandboxPolicy::new_read_only_policy(),
+            let mut sandbox = FileSystemSandboxContext::from_permission_profile(
+                PermissionProfile::read_only(),
                 cwd.clone(),
-            )?;
+            );
             sandbox.windows_sandbox_selection =
                 codex_exec_server::WindowsSandboxSelection::RestrictedToken;
             let permitted = DiscoverV2CapabilitiesRequest {
@@ -163,7 +186,15 @@ async fn v2_rpc_refreshes_metadata_and_enforces_sandbox() -> anyhow::Result<()> 
                     .iter()
                     .any(|plugin| plugin.id == "mail@market")
             );
-            assert!(response.skills.iter().any(|skill| skill.name == "demo"));
+            assert_eq!(
+                response
+                    .skills
+                    .iter()
+                    .find(|skill| skill.name == "demo")
+                    .context("sandboxed demo skill")?
+                    .discovery_root,
+                expected_root,
+            );
         }
     }
 

@@ -1,4 +1,4 @@
-//! Explicit recovery from required-daemon incompatibility. Restart is managed-only,
+//! Explicit recovery from local-daemon incompatibility. Restart is managed-only,
 //! requires a fresh confirmation, and is followed by one compatibility check, never a loop.
 
 use crate::AppServerTarget;
@@ -32,7 +32,7 @@ pub(super) async fn check(
     target: &AppServerTarget,
     config: &Config,
     cli_kv_overrides: &[(String, toml::Value)],
-    managed_daemon: bool,
+    mut managed_daemon: bool,
 ) -> io::Result<Option<String>> {
     let issue = match startup
         .run_until(daemon_startup::compatibility_warning(
@@ -48,6 +48,14 @@ pub(super) async fn check(
     if !(io::stdin().is_terminal() && io::stdout().is_terminal()) {
         return Err(io::Error::other(issue));
     }
+    if !managed_daemon && issue.restart_features.is_some() {
+        managed_daemon = startup
+            .run_until(codex_app_server_daemon::run(
+                codex_app_server_daemon::LifecycleCommand::Version,
+            ))
+            .await?
+            .is_ok_and(|status| status.backend.is_some());
+    }
     startup.flush_pending_events().await?;
     let keymap = RuntimeKeymap::from_config(&config.tui_keymap).map_err(io::Error::other)?;
     let mut view = recovery_view(&issue, managed_daemon, &keymap);
@@ -59,19 +67,16 @@ pub(super) async fn check(
         tokio::pin!(events);
         loop {
             let height = view.desired_height(tui.terminal.size()?.width);
-            tui.draw(height, |frame| {
+            let hud = chord_matcher.guide(&keymap.chords, &tui.frame_requester());
+            tui.draw_with_shortcut_hud(height, hud, |frame| {
                 view.render(frame.area(), frame.buffer_mut())
             })?;
             let Some(event) = events.next().await else {
                 break None;
             };
             tui.screen_size_for_event(&event)?;
-            if matches!(
-                &event,
-                crate::tui::TuiEvent::Paste(_) | crate::tui::TuiEvent::FocusLost
-            ) || matches!(&event, crate::tui::TuiEvent::Mouse(mouse) if mouse.kind != crossterm::event::MouseEventKind::Moved)
-            {
-                chord_matcher.cancel();
+            if tui.dismiss_shortcut_on_input(&event, &mut chord_matcher) {
+                continue;
             }
             if let crate::tui::TuiEvent::Key(key) = event
                 && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
@@ -89,8 +94,11 @@ pub(super) async fn check(
                     crate::keymap::KeyChordMatch::PassThrough => key,
                     crate::keymap::KeyChordMatch::Completed(key) => key,
                     crate::keymap::KeyChordMatch::Pending(_)
-                    | crate::keymap::KeyChordMatch::Cancelled
-                    | crate::keymap::KeyChordMatch::Ignored => continue,
+                    | crate::keymap::KeyChordMatch::Cancelled => {
+                        tui.frame_requester().schedule_frame();
+                        continue;
+                    }
+                    crate::keymap::KeyChordMatch::Ignored => continue,
                 };
                 view.handle_key_event(key);
             }
@@ -133,6 +141,7 @@ fn recovery_view(
     managed_daemon: bool,
     keymap: &RuntimeKeymap,
 ) -> ListSelectionView {
+    let can_restart = managed_daemon && issue.restart_features.is_some();
     let mut header = ColumnRenderable::new();
     header.push(Line::from(
         if issue.restart_features.is_some() {
@@ -144,15 +153,20 @@ fn recovery_view(
     ));
     header.push(Paragraph::new(issue.reason.clone()).wrap(Wrap { trim: false }));
     if let Some(features) = &issue.restart_features {
-        header.push(Line::from(
-            "Restart will use these shared feature settings:",
-        ));
-        for (name, enabled) in features {
-            header.push(Line::from(format!("  {name} = {enabled}").dim()));
-        }
         header.push(Paragraph::new(
             "These settings persist and can disable functionality for other clients. Restart may interrupt active or queued work."
         ).wrap(Wrap { trim: false }));
+        header.push(Line::from(
+            "Restart will use these shared feature settings:",
+        ));
+        let mut remaining = features.iter();
+        for (name, enabled) in remaining.by_ref().take(3) {
+            header.push(Line::from(format!("  {name} = {enabled}").dim()));
+        }
+        let count = remaining.len();
+        if count > 0 {
+            header.push(Line::from(format!("  and {count} more").dim()));
+        }
     }
     let (tx, _rx) = unbounded_channel::<AppEvent>();
     ListSelectionView::new(
@@ -166,10 +180,15 @@ fn recovery_view(
                     ..Default::default()
                 },
                 SelectionItem {
-                    name: "Restart with these settings".to_string(),
+                    name: if can_restart {
+                        "Restart with these settings (recommended)"
+                    } else {
+                        "Restart with these settings"
+                    }
+                    .to_string(),
                     dismiss_on_select: true,
                     require_explicit_confirmation: true,
-                    is_disabled: !managed_daemon || issue.restart_features.is_none(),
+                    is_disabled: !can_restart,
                     disabled_reason: if !managed_daemon {
                         Some("This server is not managed by Codex.".to_string())
                     } else if issue.restart_features.is_none() {

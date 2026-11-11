@@ -138,7 +138,7 @@ impl ChatWidget {
     pub(crate) fn pet_picker_preview_draw(&self) -> Option<crate::pets::AmbientPetDraw> {
         self.bottom_pane
             .selected_index_for_active_view(crate::pets::PET_PICKER_VIEW_ID)?;
-        let area = self.pet_picker_preview_state.area()?;
+        let area = self.pet_picker_preview_state.take_area()?;
         let request = self
             .pet_picker_preview_pet
             .as_ref()?
@@ -210,7 +210,7 @@ impl ChatWidget {
         true
     }
 
-    fn pet_image_support(&self) -> crate::pets::PetImageSupport {
+    pub(crate) fn pet_image_support(&self) -> crate::pets::PetImageSupport {
         #[cfg(test)]
         if let Some(support) = self.pet_image_support_override {
             return support;

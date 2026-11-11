@@ -8,6 +8,7 @@
 //! resize re-renders. The retained view preserves its displayed revision before that
 //! replacement, then repaints without replaying terminal scrollback.
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use color_eyre::eyre::Result;
@@ -62,6 +63,30 @@ impl App {
         } else {
             "empty_completion"
         };
+        self.replace_agent_message(tui, start..end, source, scrollback_reflow)?;
+        // Keep the host's per-message history diagnostics at the completion boundary;
+        // upstream also replaces interrupted fragments without a new completion ID.
+        tracing::info!(target: "codex_tui::history_diagnostics", "tui_history {}", serde_json::json!({
+            "event": "tui_history", "stage": outcome, "messageId": message_id,
+            "textLength": source_length, "cellCount": self.transcript_cells.len(), "replacedCells": end - start
+        }));
+        Ok(())
+    }
+
+    pub(super) fn replace_agent_message(
+        &mut self,
+        tui: &mut tui::Tui,
+        range: Range<usize>,
+        source: history_cell::AgentMarkdownCell,
+        scrollback_reflow: ConsolidationScrollbackReflow,
+    ) -> Result<()> {
+        let Range { start, end } = range;
+        // A finalized reply can arrive without provisional stream cells. Preserve its
+        // source even when the upstream fragment replacement range is empty.
+        let source_length = source.copy_source().map_or(/*default*/ 0, str::len);
+        let has_source = source
+            .copy_source()
+            .is_some_and(|text| !text.trim().is_empty());
         if start < end {
             tracing::debug!(
                 "ConsolidateAgentMessage: replacing cells [{start}..{end}] with AgentMarkdownCell"
@@ -106,10 +131,6 @@ impl App {
             self.maybe_finish_stream_reflow(tui)?;
         }
 
-        tracing::info!(target: "codex_tui::history_diagnostics", "tui_history {}", serde_json::json!({
-            "event": "tui_history", "stage": outcome, "messageId": message_id,
-            "textLength": source_length, "cellCount": self.transcript_cells.len(), "replacedCells": end - start
-        }));
         Ok(())
     }
 

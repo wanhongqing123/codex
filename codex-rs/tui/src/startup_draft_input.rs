@@ -23,10 +23,8 @@ use crate::tui::TuiEvent;
 impl StartupDraftPump {
     pub(super) fn handle_event(&mut self, tui: &mut Tui, event: TuiEvent) -> io::Result<()> {
         let screen_size = tui.screen_size_for_event(&event)?;
-        if matches!(&event, TuiEvent::Paste(_) | TuiEvent::FocusLost)
-            || matches!(&event, TuiEvent::Mouse(mouse) if mouse.kind != crossterm::event::MouseEventKind::Moved)
-        {
-            self.key_chord_matcher.cancel();
+        if tui.dismiss_shortcut_on_input(&event, &mut self.key_chord_matcher) {
+            return Ok(());
         }
         if let Some((started_at, mut newlines)) = self.pending_paste_newline.take() {
             let continues_paste = match &event {
@@ -35,7 +33,12 @@ impl StartupDraftPump {
                     modifiers,
                     kind: KeyEventKind::Press | KeyEventKind::Repeat,
                     ..
-                }) => !key_hint::has_ctrl_or_alt(*modifiers),
+                }) => {
+                    !key_hint::has_ctrl_or_alt(*modifiers)
+                        && !modifiers.intersects(
+                            KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META,
+                        )
+                }
                 TuiEvent::Key(KeyEvent {
                     code: KeyCode::Enter,
                     modifiers,
@@ -83,8 +86,11 @@ impl StartupDraftPump {
                     crate::keymap::KeyChordMatch::Completed(key) => key,
                     crate::keymap::KeyChordMatch::PassThrough => key,
                     crate::keymap::KeyChordMatch::Pending(_)
-                    | crate::keymap::KeyChordMatch::Cancelled
-                    | crate::keymap::KeyChordMatch::Ignored => return Ok(()),
+                    | crate::keymap::KeyChordMatch::Cancelled => {
+                        tui.frame_requester().schedule_frame();
+                        return Ok(());
+                    }
+                    crate::keymap::KeyChordMatch::Ignored => return Ok(()),
                 };
                 if key.code == KeyCode::Enter
                     && key.modifiers.is_empty()
@@ -228,13 +234,14 @@ pub(super) fn handle_startup_draft_key(
         }
     }
 
-    if key_hint::has_ctrl_or_alt(key.modifiers) && !bottom_pane.is_safe_startup_editor_key(key)
-        || key.code == KeyCode::Enter && !bottom_pane.is_safe_startup_editor_key(key)
-        || key
-            .modifiers
-            .intersects(KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META)
-        || !bottom_pane.is_safe_startup_editor_key(key)
-            && !matches!(
+    let is_safe_startup_editor_key = bottom_pane.is_safe_startup_editor_key(key);
+    if !is_safe_startup_editor_key
+        && (key_hint::has_ctrl_or_alt(key.modifiers)
+            || key.code == KeyCode::Enter
+            || key
+                .modifiers
+                .intersects(KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META)
+            || !matches!(
                 key.code,
                 KeyCode::Char(_)
                     | KeyCode::Enter
@@ -247,7 +254,7 @@ pub(super) fn handle_startup_draft_key(
                     | KeyCode::End
                     | KeyCode::Backspace
                     | KeyCode::Delete
-            )
+            ))
     {
         return Ok(());
     }

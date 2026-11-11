@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use codex_exec_server_protocol::JSONRPCErrorError;
-use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
@@ -16,7 +15,6 @@ use codex_sandboxing::SandboxDirectSpawnTransformRequest;
 use codex_sandboxing::SandboxExecRequest;
 use codex_sandboxing::SandboxManager;
 use codex_sandboxing::SandboxTransformRequest;
-use codex_sandboxing::SandboxType;
 use codex_utils_absolute_path::AbsolutePathBuf;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 use codex_utils_absolute_path::canonicalize_preserving_symlinks;
@@ -157,17 +155,8 @@ impl FileSystemSandboxRunner {
         let sandbox_manager = sandbox_manager.with_allowed_symlinked_codex_home(
             self.runtime_paths.allowed_symlinked_codex_home.clone(),
         );
-        let (sandbox, windows_sandbox_level) = crate::sandbox_selection::select_sandbox(
-            &sandbox_manager,
-            permission_profile,
-            sandbox_context,
-            /*has_managed_network_requirements*/ false,
-        );
-        if sandbox == SandboxType::None {
-            return Err(invalid_request(
-                "filesystem sandbox cannot be enforced on this executor".to_string(),
-            ));
-        }
+        let (selection, windows_sandbox_level) =
+            crate::sandbox_selection::sandbox_selection(sandbox_context);
         // Requests use absolute paths; the helper can start at the filesystem root even if
         // the policy cwd was removed. Keep its drive or share for Windows `:root` rules.
         let helper_cwd = cwd
@@ -191,7 +180,9 @@ impl FileSystemSandboxRunner {
                 transform: SandboxTransformRequest {
                     command,
                     permissions: permission_profile,
-                    sandbox,
+                    workspace_roots: None,
+                    runtime_readable_paths: &[],
+                    selection,
                     enforce_managed_network: false,
                     environment_id: None,
                     network: None,
@@ -202,11 +193,15 @@ impl FileSystemSandboxRunner {
                         self.runtime_paths.codex_linux_sandbox_exe.as_deref()
                     },
                     use_legacy_landlock: sandbox_context.use_legacy_landlock,
-                    windows_sandbox_level: windows_sandbox_level
-                        .unwrap_or(WindowsSandboxLevel::Disabled),
+                    windows_sandbox_level,
                 },
             })
-            .map_err(|err| invalid_request(format!("failed to prepare fs sandbox: {err}")))?;
+            .map_err(|err| match err {
+                codex_sandboxing::SandboxTransformError::SandboxUnavailable => invalid_request(
+                    "filesystem sandbox cannot be enforced on this executor".to_string(),
+                ),
+                err => invalid_request(format!("failed to prepare fs sandbox: {err}")),
+            })?;
         request.sandbox_override = sandbox_context.sandbox_override;
         Ok(request)
     }
@@ -373,10 +368,10 @@ fn helper_env_key_is_allowed(key: &str) -> bool {
         // CoreFoundation consults this before falling back to user lookup during helper startup.
         || (cfg!(target_os = "macos") && key == "__CF_USER_TEXT_ENCODING")
         || bazel_bwrap_env_key_is_allowed(key)
-        // MXC needs SystemDrive to resolve platform directories and LOCALAPPDATA
-        // to create the sandboxed helper process.
+        // MXC needs SystemDrive to resolve platform directories, and SystemRoot and
+        // LOCALAPPDATA to create the sandboxed helper process.
         || (cfg!(windows)
-            && ["PATH", "SystemDrive", "LOCALAPPDATA"]
+            && ["PATH", "SystemDrive", "SystemRoot", "LOCALAPPDATA"]
                 .iter()
                 .any(|allowed| key.eq_ignore_ascii_case(allowed)))
 }
@@ -716,6 +711,7 @@ mod tests {
                 ("Path", r"C:\Windows\System32"),
                 ("LocalAppData", r"C:\Users\test\AppData\Local"),
                 ("SystemDrive", "C:"),
+                ("systemROOT", r"C:\Windows"),
                 ("PATH_INJECTION", "bad"),
                 ("OPENAI_API_KEY", "secret"),
             ]
@@ -731,6 +727,7 @@ mod tests {
                     r"C:\Users\test\AppData\Local".to_string()
                 ),
                 ("SystemDrive".to_string(), "C:".to_string()),
+                ("systemROOT".to_string(), r"C:\Windows".to_string()),
             ])
         );
     }

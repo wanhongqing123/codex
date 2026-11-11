@@ -41,6 +41,7 @@ async fn mock_experimental_method_requires_experimental_api_capability() -> Resu
         .initialize_with_capabilities(
             default_client_info(),
             Some(InitializeCapabilities {
+                required_human_approval: false,
                 explicit_gateway_oauth: false,
                 experimental_api: false,
                 request_attestation: false,
@@ -117,6 +118,7 @@ async fn realtime_conversation_start_requires_experimental_api_capability() -> R
         .initialize_with_capabilities(
             default_client_info(),
             Some(InitializeCapabilities {
+                required_human_approval: false,
                 explicit_gateway_oauth: false,
                 experimental_api: false,
                 request_attestation: false,
@@ -149,6 +151,7 @@ async fn realtime_conversation_start_requires_experimental_api_capability() -> R
             realtime_end_instructions: None,
             prompt: Some(Some("hello".to_string())),
             realtime_session_id: None,
+            voice_session_id: None,
             transport: None,
             version: None,
             voice: None,
@@ -176,6 +179,7 @@ async fn thread_memory_mode_set_requires_experimental_api_capability() -> Result
         .initialize_with_capabilities(
             default_client_info(),
             Some(InitializeCapabilities {
+                required_human_approval: false,
                 explicit_gateway_oauth: false,
                 experimental_api: false,
                 request_attestation: false,
@@ -219,6 +223,7 @@ async fn settings_update_requires_experimental_api_capability(method: &str) -> R
         .initialize_with_capabilities(
             default_client_info(),
             Some(InitializeCapabilities {
+                required_human_approval: false,
                 explicit_gateway_oauth: false,
                 experimental_api: false,
                 request_attestation: false,
@@ -259,6 +264,7 @@ async fn realtime_webrtc_start_requires_experimental_api_capability() -> Result<
         .initialize_with_capabilities(
             default_client_info(),
             Some(InitializeCapabilities {
+                required_human_approval: false,
                 explicit_gateway_oauth: false,
                 experimental_api: false,
                 request_attestation: false,
@@ -291,6 +297,7 @@ async fn realtime_webrtc_start_requires_experimental_api_capability() -> Result<
             realtime_end_instructions: None,
             prompt: Some(Some("hello".to_string())),
             realtime_session_id: None,
+            voice_session_id: None,
             transport: Some(ThreadRealtimeStartTransport::Webrtc {
                 sdp: "v=offer\r\n".to_string(),
             }),
@@ -321,6 +328,7 @@ async fn thread_start_mock_field_requires_experimental_api_capability() -> Resul
         .initialize_with_capabilities(
             default_client_info(),
             Some(InitializeCapabilities {
+                required_human_approval: false,
                 explicit_gateway_oauth: false,
                 experimental_api: false,
                 request_attestation: false,
@@ -365,6 +373,7 @@ async fn thread_start_without_dynamic_tools_allows_without_experimental_api_capa
         .initialize_with_capabilities(
             default_client_info(),
             Some(InitializeCapabilities {
+                required_human_approval: false,
                 explicit_gateway_oauth: false,
                 experimental_api: false,
                 request_attestation: false,
@@ -408,6 +417,7 @@ async fn thread_start_granular_approval_policy_requires_experimental_api_capabil
         .initialize_with_capabilities(
             default_client_info(),
             Some(InitializeCapabilities {
+                required_human_approval: false,
                 explicit_gateway_oauth: false,
                 experimental_api: false,
                 request_attestation: false,

@@ -2,6 +2,7 @@
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
+use codex_code_mode::GrpcSessionOpenError;
 use pretty_assertions::assert_eq;
 
 use super::*;
@@ -12,6 +13,8 @@ async fn session_admission_retries_only_transient_failures_and_is_bounded() -> R
         (Code::Unavailable, 1, 2, true),
         (Code::ResourceExhausted, 1, 2, true),
         (Code::Unavailable, usize::MAX, 5, false),
+        (Code::ResourceExhausted, usize::MAX, 5, false),
+        (Code::DeadlineExceeded, 1, 1, false),
         (Code::InvalidArgument, 1, 1, false),
         (Code::Unknown, 1, 1, false),
     ] {
@@ -43,13 +46,13 @@ async fn session_admission_retries_only_transient_failures_and_is_bounded() -> R
                 .expect("admission test server");
         }));
         let provider = GrpcCodeModeSessionProvider::new(format!("http://{address}"));
-        let result = timeout(TEST_TIMEOUT, provider.create_session()).await?;
-        assert_eq!(
-            result.is_ok(),
-            succeeds,
-            "status {code}: {}",
-            result.as_ref().err().cloned().unwrap_or_default()
-        );
+        let result = timeout(TEST_TIMEOUT, provider.open_session(Default::default())).await?;
+        let actual_code = match result.as_ref() {
+            Ok(_) => None,
+            Err(GrpcSessionOpenError::AdmissionStatus { code, .. }) => Some(*code),
+            Err(error) => anyhow::bail!("unexpected session open error: {error}"),
+        };
+        assert_eq!(actual_code, (!succeeds).then_some(code));
         assert_eq!(attempts.load(Ordering::SeqCst), expected_attempts);
         if let Ok(session) = result {
             let response = execute(
@@ -228,6 +231,7 @@ async fn routing_metadata_is_scoped_to_each_session_on_a_shared_provider() -> Re
                 WaitRequest {
                     cell_id: id.clone(),
                     yield_time_ms: 1,
+                    max_output_tokens: None,
                 },
                 /*preempt*/ None,
             )
@@ -237,7 +241,10 @@ async fn routing_metadata_is_scoped_to_each_session_on_a_shared_provider() -> Re
             outcome,
             WaitOutcome::LiveCell(RuntimeResponse::Yielded { .. })
         ));
-        session.terminate(id).await.map_err(anyhow::Error::msg)?;
+        session
+            .terminate(id.into())
+            .await
+            .map_err(anyhow::Error::msg)?;
     }
     for session in [&parent, &child] {
         execute(

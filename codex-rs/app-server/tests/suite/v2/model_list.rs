@@ -20,9 +20,11 @@ use codex_app_server_protocol::RequestId;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_login::AuthKeyringBackendKind;
 use codex_login::login_with_api_key;
+use codex_models_manager::model_info::model_info_from_slug;
 use codex_protocol::openai_models::MODEL_SPECIALTY_CYBER;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelPreset;
+use codex_protocol::openai_models::ModelVisibility;
 use codex_protocol::openai_models::ModelsResponse;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -102,6 +104,31 @@ requires_openai_auth = true
         .with_env_overrides(&[("OPENAI_API_KEY", None), ("CODEX_API_KEY", None)])
         .build_initialized()
         .await?;
+    // Exercise runtime toggles after login has replaced the startup catalog manager.
+    if let Some(enabled) = app_enablement {
+        let _: ExperimentalFeatureEnablementSetResponse = mcp
+            .request(
+                |request_id| ClientRequest::ExperimentalFeatureEnablementSet {
+                    request_id,
+                    params: ExperimentalFeatureEnablementSetParams {
+                        enablement: [("api_key_model_discovery".to_string(), !enabled)].into(),
+                    },
+                },
+            )
+            .await?;
+    }
+    let config_path = codex_home.path().join("config.toml");
+    let config = std::fs::read_to_string(&config_path)?
+        .replace("name = \"OpenAI\"", "name = \"After login\"");
+    std::fs::write(config_path, config)?;
+    let login = mcp.send_login_account_api_key_request("test-key").await?;
+    let _: codex_app_server_protocol::LoginAccountResponse = mcp.read_response(login).await?;
+    let _: ModelListResponse = mcp
+        .request(|request_id| ClientRequest::ModelList {
+            request_id,
+            params: ModelListParams::default(),
+        })
+        .await?;
     let mut bundled = codex_models_manager::bundled_models_response()?.models;
     bundled.sort_by_key(|model| model.priority);
     let mut bundled = ModelPreset::filter_by_auth(
@@ -131,6 +158,7 @@ requires_openai_auth = true
                 limit: Some(100),
                 include_hidden: Some(true),
                 cursor: None,
+                ..Default::default()
             },
         })
         .await?;
@@ -249,6 +277,7 @@ async fn list_models_returns_all_models_with_large_limit() -> Result<()> {
                 limit: Some(100),
                 cursor: None,
                 include_hidden: None,
+                ..Default::default()
             },
         })
         .await?;
@@ -279,6 +308,7 @@ async fn list_models_includes_hidden_models() -> Result<()> {
                 limit: Some(100),
                 cursor: None,
                 include_hidden: Some(true),
+                ..Default::default()
             },
         })
         .await?;
@@ -348,7 +378,8 @@ async fn list_models_uses_remote_catalog_as_source_of_truth(
         .and(header("authorization", format!("Bearer {bearer_token}")))
         .respond_with(
             ResponseTemplate::new(/*s*/ 200).set_body_json(ModelsResponse {
-                models: remote_models.clone(),
+                // This custom provider expects priority ordering even if the array is unsorted.
+                models: remote_models.iter().rev().cloned().collect(),
             }),
         )
         .expect(1..)
@@ -401,6 +432,7 @@ model_catalog_url = "{server_uri}/v1/models"
             limit: Some(100),
             cursor: None,
             include_hidden: None,
+            ..Default::default()
         })
         .await?;
     let response = mcp
@@ -460,6 +492,57 @@ model_catalog_url = "{server_uri}/v1/models"
 }
 
 #[tokio::test]
+async fn list_models_uses_display_order_and_marks_the_selection_default() -> Result<()> {
+    let home = TempDir::new()?;
+    let backend = MockServer::start().await;
+    let models = [("z-model", 3), ("a-model", 2), ("recommended", 1)]
+        .into_iter()
+        .map(|(slug, priority)| ModelInfo {
+            priority,
+            visibility: ModelVisibility::List,
+            ..model_info_from_slug(slug)
+        })
+        .collect();
+    Mock::given(method("GET"))
+        .and(path("/backend-api/codex/models"))
+        .respond_with(ResponseTemplate::new(/*s*/ 200).set_body_json(ModelsResponse { models }))
+        .mount(&backend)
+        .await;
+    write_chatgpt_auth(
+        home.path(),
+        ChatGptAuthFixture::new("chatgpt-access-token").plan_type("team"),
+        AuthCredentialsStoreMode::File,
+    )?;
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!("openai_base_url = \"{}/backend-api/codex\"", backend.uri()),
+    )?;
+    let mut server = TestAppServer::builder()
+        .with_codex_home(home.path())
+        .build_initialized()
+        .await?;
+    let response: ModelListResponse = server
+        .request(|request_id| ClientRequest::ModelList {
+            request_id,
+            params: ModelListParams::default(),
+        })
+        .await?;
+    assert_eq!(
+        response
+            .data
+            .iter()
+            .map(|row| (row.model.as_str(), row.is_default))
+            .collect::<Vec<_>>(),
+        [
+            ("z-model", false),
+            ("a-model", false),
+            ("recommended", true)
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn list_models_pagination_works() -> Result<()> {
     let codex_home = TempDir::new()?;
     write_models_cache(codex_home.path()).await?;
@@ -484,6 +567,7 @@ async fn list_models_pagination_works() -> Result<()> {
                     limit: Some(1),
                     cursor: cursor.clone(),
                     include_hidden: None,
+                    ..Default::default()
                 },
             })
             .await?;
@@ -520,6 +604,7 @@ async fn list_models_rejects_invalid_cursor() -> Result<()> {
             limit: None,
             cursor: Some("invalid".to_string()),
             include_hidden: None,
+            ..Default::default()
         })
         .await?;
 

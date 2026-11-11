@@ -10,10 +10,8 @@ use crate::runtime::MemoryStartupContext;
 use crate::runtime::StageOneRequestContext;
 use codex_config::types::MemoriesConfig;
 use codex_core::Prompt;
-use codex_core::RolloutRecorder;
 use codex_core::config::Config;
 use codex_protocol::MemoryVersion;
-use codex_protocol::ResponseItemId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
@@ -264,7 +262,7 @@ mod job {
         rollout_git_branch: Option<&str>,
         stage_one_context: &StageOneRequestContext,
     ) -> anyhow::Result<(StageOneOutput, Option<TokenUsage>)> {
-        let (rollout_items, _, _) = RolloutRecorder::load_rollout_items(rollout_path).await?;
+        let rollout_items = crate::rollout_input::read_recent_rollout_items(rollout_path).await?;
         let rollout_contents = match config.memories.version {
             MemoryVersion::V1 => serialize_filtered_rollout_response_items(&rollout_items)?,
             MemoryVersion::V2 => crate::rollout_input::serialize_tiered_input(
@@ -293,7 +291,7 @@ mod job {
             MemoryVersion::V1 => vec![ResponseItem::Message {
                 status: None,
                 encrypted_content: None,
-                id: Some(ResponseItemId::new("msg")),
+                id: Some(context.item_id_generator()("msg")),
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText { text: input_text }],
                 phase: None,
@@ -406,7 +404,8 @@ mod job {
                 RolloutItem::InterAgentCommunication(communication) => {
                     Some(communication.to_model_input_item())
                 }
-                RolloutItem::SessionMeta(_)
+                RolloutItem::DynamicToolsUpdated { .. }
+                | RolloutItem::SessionMeta(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. }
                 | RolloutItem::Compacted(_)
                 | RolloutItem::TurnContext(_)

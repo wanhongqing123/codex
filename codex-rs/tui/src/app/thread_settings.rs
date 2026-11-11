@@ -29,6 +29,14 @@ impl App {
             return;
         };
         params.effort = effort;
+        self.send_model_settings_update(app_server, params).await;
+    }
+
+    pub(super) async fn send_model_settings_update(
+        &mut self,
+        app_server: &mut AppServerSession,
+        params: ThreadSettingsUpdateParams,
+    ) -> bool {
         let defaulted_to_auto_review = params.approvals_reviewer
             == Some(AppServerApprovalsReviewer::AutoReview)
             && (self.chat_widget.config_ref().approvals_reviewer != ApprovalsReviewer::AutoReview
@@ -61,6 +69,7 @@ impl App {
         if defaulted_to_auto_review && settings_updated {
             self.app_event_tx.send(AppEvent::CyberModelAutoReviewNotice);
         }
+        settings_updated
     }
 
     pub(super) fn active_thread_model_setting_update_params(
@@ -247,7 +256,10 @@ impl App {
     }
 }
 
-fn apply_thread_settings_to_session(session: &mut ThreadSessionState, settings: &ThreadSettings) {
+pub(super) fn apply_thread_settings_to_session(
+    session: &mut ThreadSessionState,
+    settings: &ThreadSettings,
+) {
     if settings.collaboration_mode.mode == ModeKind::Default {
         session.model = settings.model.clone();
         session.reasoning_effort = settings.effort.clone();

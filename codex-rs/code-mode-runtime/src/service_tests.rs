@@ -98,6 +98,7 @@ async fn interrupt_yields_execute_and_wait_without_stopping_the_cell() {
                     WaitRequest {
                         cell_id: cell_id("1"),
                         yield_time_ms: 60_000,
+                        max_output_tokens: None,
                     },
                     Some(wait_signal),
                 )
@@ -125,6 +126,7 @@ async fn interrupt_yields_execute_and_wait_without_stopping_the_cell() {
                     WaitRequest {
                         cell_id: cell_id("1"),
                         yield_time_ms: 60_000,
+                        max_output_tokens: None,
                     },
                     /*preempt*/ None,
                 )
@@ -139,6 +141,7 @@ async fn interrupt_yields_execute_and_wait_without_stopping_the_cell() {
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "done".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         })
     );
@@ -173,6 +176,7 @@ async fn execute_waits_for_nested_tool_during_yield_grace() {
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "done".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -219,6 +223,7 @@ async fn execute_and_wait_clamp_yield_grace_without_stopping_the_cell() {
             WaitRequest {
                 cell_id: cell_id("1"),
                 yield_time_ms: 10_000,
+                max_output_tokens: None,
             },
             /*preempt*/ None,
         )
@@ -241,6 +246,7 @@ async fn execute_and_wait_clamp_yield_grace_without_stopping_the_cell() {
             WaitRequest {
                 cell_id: cell_id("1"),
                 yield_time_ms: 10_000,
+                max_output_tokens: None,
             },
             /*preempt*/ None,
         )
@@ -254,6 +260,7 @@ async fn execute_and_wait_clamp_yield_grace_without_stopping_the_cell() {
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "done".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         })
     );
@@ -288,6 +295,7 @@ async fn wait_waits_for_nested_tool_during_yield_grace() {
             WaitRequest {
                 cell_id: cell_id("1"),
                 yield_time_ms: 10_000,
+                max_output_tokens: None,
             },
             /*preempt*/ None,
         )
@@ -306,6 +314,7 @@ async fn wait_waits_for_nested_tool_during_yield_grace() {
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "done".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         })
     );
@@ -362,6 +371,7 @@ async fn zero_yield_limit_is_immediate_and_scoped_to_its_session() {
             WaitRequest {
                 cell_id: cell_id("1"),
                 yield_time_ms: 60_000,
+                max_output_tokens: None,
             },
             /*preempt*/ None,
         )
@@ -415,6 +425,7 @@ async fn tool_start_acknowledgement_reports_error_before_invocation() {
             code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            result_buffered_for: Duration::ZERO,
             error_text: Some("startup failed".to_string()),
         }
     );
@@ -436,7 +447,7 @@ async fn tool_start_acknowledgement_reports_termination_before_invocation() {
 
     let (startup, terminated) = tokio::join!(
         wait_until_tool_started(&delegate),
-        service.terminate(cell_id("1")),
+        service.terminate(cell_id("1").into()),
     );
     assert_eq!(startup, Err("cell closed before nested tool started"));
     let response = RuntimeResponse::Terminated {
@@ -572,6 +583,7 @@ async fn synchronous_exit_returns_successfully() {
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "before".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -667,6 +679,7 @@ throw {
                 content_items: vec![FunctionCallOutputContentItem::InputText {
                     text: "before".to_string(),
                 }],
+                result_buffered_for: Duration::ZERO,
                 error_text: None,
             },
             "{label}"
@@ -688,6 +701,7 @@ throw {
                 content_items: vec![FunctionCallOutputContentItem::InputText {
                     text: "before".to_string(),
                 }],
+                result_buffered_for: Duration::ZERO,
                 error_text: None,
             },
             "{label}: next cell"
@@ -735,23 +749,26 @@ text("after exit");
         }
     );
     delegate.release_tool();
+    let actual = service
+        .wait(
+            WaitRequest {
+                max_output_tokens: None,
+                cell_id: cell_id("1"),
+                yield_time_ms: 30_000,
+            },
+            /*preempt*/ None,
+        )
+        .await
+        .unwrap();
     assert_eq!(
-        service
-            .wait(
-                WaitRequest {
-                    cell_id: cell_id("1"),
-                    yield_time_ms: 30_000,
-                },
-                /*preempt*/ None,
-            )
-            .await
-            .unwrap(),
+        actual,
         WaitOutcome::LiveCell(RuntimeResponse::Result {
             code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "after tool".to_string(),
             }],
+            result_buffered_for: actual.result_buffered_for().unwrap(),
             error_text: None,
         })
     );
@@ -770,6 +787,7 @@ text("after exit");
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "after tool".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -815,6 +833,7 @@ async fn stored_values_are_shared_between_cells_but_not_sessions() {
             code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -826,6 +845,7 @@ async fn stored_values_are_shared_between_cells_but_not_sessions() {
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "visible".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -837,6 +857,7 @@ async fn stored_values_are_shared_between_cells_but_not_sessions() {
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "undefined".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -879,6 +900,7 @@ text(load("key"));
                     text: "null".to_string(),
                 },
             ],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -977,7 +999,7 @@ store("healthy", {[keys[0]]: "null"});
                 vec![FunctionCallOutputContentItem::InputText {
                     text: expected_text.to_string()
                 }],
-                expected_error.map(str::to_string)
+                expected_error.map(str::to_string),
             )
         );
     }
@@ -1055,6 +1077,7 @@ async fn execute_to_pending_returns_completed_for_synchronous_results() {
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "done".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         })
     );
@@ -1090,7 +1113,7 @@ async fn execute_to_pending_returns_once_the_runtime_is_quiescent() {
         }
     );
 
-    let termination = service.terminate(cell_id("1")).await.unwrap();
+    let termination = service.terminate(cell_id("1").into()).await.unwrap();
 
     assert_eq!(
         termination,
@@ -1134,7 +1157,7 @@ await Promise.all([
         }
     );
 
-    let termination = service.terminate(cell_id("1")).await.unwrap();
+    let termination = service.terminate(cell_id("1").into()).await.unwrap();
 
     assert_eq!(
         termination,
@@ -1202,7 +1225,7 @@ await Promise.all([
         })
     );
 
-    let termination = service.terminate(cell_id("1")).await.unwrap();
+    let termination = service.terminate(cell_id("1").into()).await.unwrap();
 
     assert_eq!(
         termination,
@@ -1269,7 +1292,7 @@ await new Promise(() => {});
         })
     );
 
-    let termination = service.terminate(cell_id("1")).await.unwrap();
+    let termination = service.terminate(cell_id("1").into()).await.unwrap();
 
     assert_eq!(
         termination,
@@ -1333,6 +1356,7 @@ text("done");
                 content_items: vec![FunctionCallOutputContentItem::InputText {
                     text: "done".to_string(),
                 }],
+                result_buffered_for: Duration::ZERO,
                 error_text: None,
             }
         ))
@@ -1426,6 +1450,7 @@ async fn global_scope_contains_only_allowed_items() {
         "add_content",
         "as_settled",
         "audio",
+        "content",
         "decodeURI",
         "decodeURIComponent",
         "encodeURI",
@@ -1481,6 +1506,7 @@ async fn v8_console_is_not_exposed_on_global_this() {
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "false".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -1522,6 +1548,7 @@ text(value);
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "jeudi 2 janvier \u{e0} 03:04:05".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -1562,6 +1589,7 @@ text(formatter.format(new Date("2025-01-02T03:04:05Z")));
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "jeudi 2 janvier \u{e0} 03:04:05".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -1610,19 +1638,24 @@ text(JSON.stringify(returnsUndefined));
                     text: "[true,true,true,true]".to_string(),
                 },
             ],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
 }
 
 #[tokio::test]
-async fn text_helper_serializes_objects() {
+async fn text_serializes_objects_and_content_forwards_mcp_text() {
     let service = InProcessCodeModeSession::new();
 
     let response = execute(
         &service,
         ExecuteRequest {
-            source: "text({ json: true });".to_string(),
+            source: r#"const block = {type: "text", text: "caption", json: true};
+text(block);
+text(block.text);
+content(block);"#
+                .to_string(),
             yield_time_ms: None,
             ..execute_request("")
         },
@@ -1634,16 +1667,21 @@ async fn text_helper_serializes_objects() {
         RuntimeResponse::Result {
             code_mode_host_duration: None,
             cell_id: cell_id("1"),
-            content_items: vec![FunctionCallOutputContentItem::InputText {
-                text: r#"{"json":true}"#.to_string(),
-            }],
+            content_items: [
+                r#"{"type":"text","text":"caption","json":true}"#,
+                "caption",
+                "caption"
+            ]
+            .map(|text| FunctionCallOutputContentItem::InputText { text: text.into() })
+            .into(),
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
 }
 
 #[tokio::test]
-async fn output_helpers_surface_serialization_errors() {
+async fn output_helpers_surface_input_errors() {
     for (source, expected_error) in [
         (
             "const circular = {}; circular.self = circular; text(circular);",
@@ -1656,6 +1694,14 @@ async fn output_helpers_surface_serialization_errors() {
         (
             "image({type: 'image', get data() { throw new Error('MCP getter failed'); }});",
             "MCP getter failed",
+        ),
+        (
+            "image({type: 'image', data: ''});",
+            "image expected MCP image data",
+        ),
+        (
+            "image({type: 'audio'});",
+            r#"image only accepts MCP image blocks, got "audio""#,
         ),
     ] {
         let service = InProcessCodeModeSession::new();
@@ -1686,6 +1732,7 @@ async fn output_helpers_surface_serialization_errors() {
                 code_mode_host_duration: None,
                 cell_id: cell_id("1"),
                 content_items: Vec::new(),
+                result_buffered_for: Duration::ZERO,
                 error_text: Some(error_text),
             }
         );
@@ -1729,6 +1776,7 @@ audio({
                     audio_url: "data:audio/wav;base64,YXVkaW8=".to_string(),
                 },
             ],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -1761,6 +1809,7 @@ async fn audio_helper_rejects_non_data_urls() {
                 code_mode_host_duration: None,
                 cell_id: cell_id("1"),
                 content_items: Vec::new(),
+                result_buffered_for: Duration::ZERO,
                 error_text: Some(
                     "Tool call failed: invalid audio output. Pass a base64 data URI instead"
                         .to_string(),
@@ -1771,17 +1820,19 @@ async fn audio_helper_rejects_non_data_urls() {
 }
 
 #[tokio::test]
-async fn image_helper_accepts_raw_mcp_image_block_with_original_detail() {
+async fn image_and_content_forward_the_same_raw_mcp_image() {
     let service = InProcessCodeModeSession::new();
 
     let response = execute(&service, ExecuteRequest {
                 source: r#"
-image({
+const block = {
   type: "image",
   data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==",
-  mimeType: "image/png",
+  mime_type: "image/png",
   _meta: { "codex/imageDetail": "original" },
-});
+};
+image(block);
+content(block);
 "#
                 .to_string(),
                 yield_time_ms: None,
@@ -1797,10 +1848,219 @@ image({
                 content_items: vec![FunctionCallOutputContentItem::InputImage {
                     image_url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==".to_string(),
                     detail: Some(crate::ImageDetail::Original),
-                }],
+                }; 2],
+                result_buffered_for: Duration::ZERO,
                 error_text: None,
             }
         );
+}
+
+#[tokio::test]
+async fn media_helpers_preserve_legacy_mime_inputs_and_detail_overrides() {
+    let response = execute(
+        &InProcessCodeModeSession::new(),
+        ExecuteRequest {
+            yield_time_ms: None,
+            ..execute_request(
+                r#"
+image({type: "image", data: "YQ==", mimeType: "image/png", mime_type: "image/jpeg"});
+audio({type: "audio", data: "YQ==", mimeType: 1, mime_type: "audio/wav"});
+image({type: "image", data: "DaTa:image/png;base64,YQ==", mimeType: ""}, "LOW");
+"#,
+            )
+        },
+    )
+    .await;
+    assert_eq!(
+        response,
+        RuntimeResponse::Result {
+            code_mode_host_duration: None,
+            cell_id: cell_id("1"),
+            content_items: vec![
+                FunctionCallOutputContentItem::InputImage {
+                    image_url: "data:image/png;base64,YQ==".into(),
+                    detail: Some(crate::DEFAULT_IMAGE_DETAIL),
+                },
+                FunctionCallOutputContentItem::InputAudio {
+                    audio_url: "data:application/octet-stream;base64,YQ==".into(),
+                },
+                FunctionCallOutputContentItem::InputImage {
+                    image_url: "DaTa:image/png;base64,YQ==".into(),
+                    detail: Some(crate::ImageDetail::Low),
+                },
+            ],
+            result_buffered_for: Duration::ZERO,
+            error_text: None,
+        }
+    );
+}
+
+#[tokio::test]
+async fn content_helper_forwards_mixed_mcp_blocks_in_order() {
+    let link = serde_json::json!({
+        "type": "resource_link", "name": "notes", "uri": "file:///notes",
+    });
+    let resource = serde_json::json!({
+        "type": "resource", "resource": {"uri": "file:///notes", "text": "notes"},
+    });
+    let blob = serde_json::json!({
+        "type": "resource", "resource": {"uri": "file:///sample", "blob": "YWJj"},
+    });
+    let blocks = serde_json::json!([
+        {"type": "text", "text": "caption", "annotations": {"priority": 0.5}},
+        {
+            "type": "image",
+            "data": "aW1hZ2U=",
+            "mimeType": "image/png",
+            "_meta": {"codex/imageDetail": "original"},
+        },
+        {"type": "audio", "data": "YXVkaW8=", "mimeType": "audio/mpeg"},
+        link, resource, blob,
+    ]);
+    let response = execute(
+        &InProcessCodeModeSession::new(),
+        ExecuteRequest {
+            yield_time_ms: None,
+            ..execute_request(&format!("content({blocks})"))
+        },
+    )
+    .await;
+    assert_eq!(
+        response,
+        RuntimeResponse::Result {
+            code_mode_host_duration: None,
+            cell_id: cell_id("1"),
+            content_items: vec![
+                FunctionCallOutputContentItem::InputText {
+                    text: "caption".into()
+                },
+                FunctionCallOutputContentItem::InputImage {
+                    image_url: "data:image/png;base64,aW1hZ2U=".into(),
+                    detail: Some(crate::ImageDetail::Original),
+                },
+                FunctionCallOutputContentItem::InputAudio {
+                    audio_url: "data:audio/mpeg;base64,YXVkaW8=".into(),
+                },
+                FunctionCallOutputContentItem::InputText {
+                    text: link.to_string()
+                },
+                FunctionCallOutputContentItem::InputText {
+                    text: resource.to_string()
+                },
+                FunctionCallOutputContentItem::InputText {
+                    text: blob.to_string()
+                },
+            ],
+            result_buffered_for: Duration::ZERO,
+            error_text: None,
+        }
+    );
+}
+
+#[tokio::test]
+async fn content_helper_consumes_iterables_in_order_and_closes_on_error() {
+    let response = execute(
+        &InProcessCodeModeSession::new(),
+        ExecuteRequest {
+            yield_time_ms: None,
+            ..execute_request(
+                r#"
+const block = (text) => ({type: "text", text});
+content([]);
+[block("single")].forEach(content);
+content(new Set([block("set")]));
+
+const failure = new Error("iterator failed");
+function* generator() { yield block("generator"); throw failure; }
+try { content(generator()); } catch (error) {
+  if (error !== failure) throw error;
+  text("caught iterator error");
+}
+
+let reads = 0;
+const iterable = {
+  get [Symbol.iterator]() {
+    if (++reads !== 1) throw new Error("iterator getter read twice");
+    return function () {
+      if (this !== iterable) throw new Error("wrong iterator receiver");
+      const items = [block("first"), {type: "image"}, block("past error")].values();
+      return {
+        next() { text("next"); return items.next(); },
+        return() { text("closed"); return {}; },
+      };
+    };
+  },
+};
+try { content(iterable); } catch (error) { text(error); }
+"#,
+            )
+        },
+    )
+    .await;
+    let expected = [
+        "single",
+        "set",
+        "generator",
+        "caught iterator error",
+        "next",
+        "first",
+        "next",
+        "closed",
+        "content expects one MCP ContentBlock",
+    ];
+    assert_eq!(
+        response,
+        RuntimeResponse::Result {
+            code_mode_host_duration: None,
+            cell_id: cell_id("1"),
+            content_items: expected
+                .into_iter()
+                .map(|text| FunctionCallOutputContentItem::InputText { text: text.into() })
+                .collect(),
+            result_buffered_for: Duration::ZERO,
+            error_text: None,
+        }
+    );
+}
+
+#[tokio::test]
+async fn content_helper_rejects_invalid_blocks_and_encrypted_text_without_emitting_them() {
+    let response = execute(
+        &InProcessCodeModeSession::new(),
+        ExecuteRequest {
+            yield_time_ms: None,
+            ..execute_request(
+                r#"
+for (const block of [
+  undefined, "", {content: []}, [[{type: "text", text: "nested"}]], ["text", "nested"],
+  {type: "unknown"}, {type: "text", text: 1}, {type: "image"},
+  {type: "resource", resource: {uri: "file:///notes"}}, {type: "resource_link"},
+  {type: "text", text: "opaque", _meta: {"codex/encryptedContent": true}},
+]) {
+  try { content(block); } catch (error) {
+    const expected = block?._meta?.["codex/encryptedContent"]
+      ? "content cannot emit encrypted MCP text"
+      : "content expects one MCP ContentBlock";
+    if (error === expected) continue;
+    throw error;
+  }
+  throw new Error("expected content to reject the block");
+}
+"#,
+            )
+        },
+    )
+    .await;
+    assert_eq!(
+        response,
+        RuntimeResponse::Result {
+            code_mode_host_duration: None,
+            cell_id: cell_id("1"),
+            content_items: Vec::new(),
+            result_buffered_for: Duration::ZERO,
+            error_text: None,
+        }
+    );
 }
 
 #[tokio::test]
@@ -1837,6 +2097,7 @@ generatedImage({
                     text: "generated image save hint".to_string(),
                 },
             ],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -1874,6 +2135,7 @@ image(
                 image_url: "data:image/png;base64,AAA".to_string(),
                 detail: Some(crate::ImageDetail::Original),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -1910,6 +2172,7 @@ image(
                     image_url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==".to_string(),
                     detail: Some(crate::ImageDetail::High),
                 }],
+                result_buffered_for: Duration::ZERO,
                 error_text: None,
             }
         );
@@ -1944,6 +2207,7 @@ image({
                 image_url: "data:image/png;base64,AAA".to_string(),
                 detail: Some(crate::ImageDetail::Low),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -1977,6 +2241,7 @@ async fn image_helpers_reject_remote_urls() {
                         code_mode_host_duration: None,
                         cell_id: cell_id("1"),
                         content_items: Vec::new(),
+                        result_buffered_for: Duration::ZERO,
                         error_text: Some(
                             "Tool call failed: remote image URLs are not supported in tool outputs. Pass a base64 data URI instead".to_string(),
                         ),
@@ -2012,6 +2277,7 @@ async fn image_helpers_reject_invalid_image_outputs() {
                 code_mode_host_duration: None,
                 cell_id: cell_id("1"),
                 content_items: Vec::new(),
+                result_buffered_for: Duration::ZERO,
                 error_text: Some(
                     "Tool call failed: invalid image output. Pass a base64 data URI instead"
                         .to_string(),
@@ -2047,6 +2313,7 @@ image({
             code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            result_buffered_for: Duration::ZERO,
             error_text: Some("image detail must be one of: auto, low, high, original".to_string()),
         }
     );
@@ -2082,6 +2349,7 @@ image({
                 code_mode_host_duration: None,
                 cell_id: cell_id("1"),
                 content_items: Vec::new(),
+                result_buffered_for: Duration::ZERO,
                 error_text: Some(
                     "image expects a non-empty image URL string, an object with image_url and optional detail, or a raw MCP image block".to_string(),
                 ),
@@ -2098,6 +2366,7 @@ async fn wait_reports_missing_cell_separately_from_runtime_results() {
             WaitRequest {
                 cell_id: cell_id("missing"),
                 yield_time_ms: 1,
+                max_output_tokens: None,
             },
             /*preempt*/ None,
         )
@@ -2110,6 +2379,7 @@ async fn wait_reports_missing_cell_separately_from_runtime_results() {
             code_mode_host_duration: None,
             cell_id: cell_id("missing"),
             content_items: Vec::new(),
+            result_buffered_for: Duration::ZERO,
             error_text: Some("exec cell missing not found".to_string()),
         })
     );

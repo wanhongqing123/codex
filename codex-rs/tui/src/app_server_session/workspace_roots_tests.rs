@@ -3,6 +3,7 @@
 use super::*;
 use crate::legacy_core::config::ConfigBuilder;
 use crate::legacy_core::config::ConfigOverrides;
+use codex_app_server_client::AppServerEvent;
 use codex_app_server_protocol::ServerNotification;
 use core_test_support::responses;
 use pretty_assertions::assert_eq;
@@ -91,6 +92,7 @@ stream_max_retries = 0
                 app_server
                     .turn_start(
                         thread_id,
+                        "user",
                         "user-message".to_string(),
                         vec![UserInput::Text {
                             text: "hello".to_string(),
@@ -108,11 +110,12 @@ stream_max_retries = 0
                         /*collaboration_mode*/ None,
                         /*output_schema*/ None,
                         /*cyber_access_program*/ None,
+                        /*cloud_selection*/ None,
                     )
                     .await?;
                 tokio::time::timeout(std::time::Duration::from_secs(/*secs*/ 30), async {
                     while let Some(event) = app_server.next_event().await {
-                        if let AppServerEvent::ServerNotification(notification) = event
+                        if let AppServerEvent::ServerNotification(notification) = event.event
                             && let ServerNotification::TurnCompleted(completed) = *notification
                         {
                             assert_eq!(
@@ -167,6 +170,7 @@ stream_max_retries = 0
                         session_config,
                         thread_id,
                         /*selected_profile*/ None,
+                        crate::app_server_session::SideChatStorage::Temporary,
                     )
                     .await?;
                 assert_eq!(side.session.runtime_workspace_roots, expected_roots);

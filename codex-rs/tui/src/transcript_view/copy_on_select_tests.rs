@@ -55,8 +55,16 @@ fn copy_on_select_waits_for_release_and_confirmed_delivery() {
         assert!(!view.tick_selection(&cells));
         if let Some(copied) = copied {
             let selection_copy = selection_copy.expect("copy on select policy");
-            assert_eq!(selection_copy, SelectionCopy::OnSelect { clear_selection });
-            assert!(selection_copy.publishes_primary());
+            assert_eq!(
+                selection_copy,
+                SelectionCopy::on_select(
+                    /*clipboard*/ true,
+                    /*primary*/ false,
+                    clear_selection,
+                )
+            );
+            assert!(selection_copy.copies_clipboard());
+            assert!(!selection_copy.publishes_primary());
             let buffer = render(&mut view, &cells, /*width*/ 20, /*height*/ 1);
             let highlight = (0..20)
                 .map(|column| {
@@ -178,7 +186,7 @@ fn copy_on_select_preserves_link_activation_and_ignores_empty_drags() {
             copy_on_select: true,
             ..Default::default()
         };
-        render(&mut view, &cells, /*width*/ 30, /*height*/ 1);
+        render(&mut view, &cells, /*width*/ 30, /*height*/ 2);
         let down = mouse(MouseEventKind::Down(MouseButton::Left), /*column*/ 2);
         assert!(matches!(
             view.handle_mouse(down, &cells),
