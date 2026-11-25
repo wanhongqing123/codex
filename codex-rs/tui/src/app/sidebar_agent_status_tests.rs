@@ -314,6 +314,8 @@ async fn opens_agent_transcript_beside_parent_and_returns_to_chooser() -> color_
     use crossterm::event::MouseEvent;
     use ratatui::layout::Size;
 
+    // Keep event future construction out of this scenario's poll frame. Plain Box::pin
+    // retains a large temporary beside the nested navigation frames on Windows.
     let (mut app, mut rx, _ops) = Box::pin(make_test_app_with_channels()).await;
     enable_side_retention(&mut app)?;
     app.local_settings.tui.animations = false;
@@ -392,7 +394,7 @@ async fn opens_agent_transcript_beside_parent_and_returns_to_chooser() -> color_
             ) {
                 break Ok::<_, color_eyre::Report>(event);
             }
-            Box::pin(app.handle_event(&mut tui, &mut server, event)).await?;
+            crate::boxed_future!(app.handle_event(&mut tui, &mut server, event)).await?;
         }
     })
     .await??;
@@ -412,7 +414,7 @@ async fn opens_agent_transcript_beside_parent_and_returns_to_chooser() -> color_
     let agent = link.agent_id().unwrap();
     let backend = server.backend_id();
     for (source, target) in [(ThreadId::new(), agent), (root, ThreadId::new())] {
-        Box::pin(app.handle_event(
+        crate::boxed_future!(app.handle_event(
             &mut tui,
             &mut server,
             crate::app_event::AppEvent::OpenSidebarAgent {
@@ -427,7 +429,7 @@ async fn opens_agent_transcript_beside_parent_and_returns_to_chooser() -> color_
     // A thread ID recovered from replay is a candidate, even if it was inherited from a fork.
     let inherited = ThreadId::new();
     assert!(app.register_sidebar_agent(root, inherited));
-    Box::pin(app.handle_event(
+    crate::boxed_future!(app.handle_event(
         &mut tui,
         &mut server,
         crate::app_event::AppEvent::OpenSidebarAgent {
@@ -466,15 +468,15 @@ async fn opens_agent_transcript_beside_parent_and_returns_to_chooser() -> color_
         MouseEventKind::Up(MouseButton::Left),
     ] {
         let click = crate::app::owned_transcript::tests::mouse(kind, column, row);
-        Box::pin(app.handle_tui_event(&mut tui, &mut server, click)).await?;
+        crate::boxed_future!(app.handle_tui_event(&mut tui, &mut server, click)).await?;
     }
     while let Ok(event) = rx.try_recv() {
-        Box::pin(app.handle_event(&mut tui, &mut server, event)).await?;
+        crate::boxed_future!(app.handle_event(&mut tui, &mut server, event)).await?;
     }
     assert_eq!(app.current_displayed_thread_id(), Some(root));
-    Box::pin(app.handle_event(&mut tui, &mut server, discovery)).await?;
+    crate::boxed_future!(app.handle_event(&mut tui, &mut server, discovery)).await?;
     while let Ok(event) = rx.try_recv() {
-        Box::pin(app.handle_event(&mut tui, &mut server, event)).await?;
+        crate::boxed_future!(app.handle_event(&mut tui, &mut server, event)).await?;
     }
     assert_eq!(app.current_displayed_thread_id(), Some(child));
     assert_eq!(app.docked_agent(), Some((root, child)));
@@ -489,11 +491,19 @@ async fn opens_agent_transcript_beside_parent_and_returns_to_chooser() -> color_
     assert!(!screen.contains("direct input is disabled"), "{screen}");
 
     app.keymap.pager.jump_top = vec![crate::key_hint::plain(KeyCode::F(6))];
-    Box::pin(app.handle_tui_event(&mut tui, &mut server, TuiEvent::Key(KeyCode::F(6).into())))
-        .await?;
+    crate::boxed_future!(app.handle_tui_event(
+        &mut tui,
+        &mut server,
+        TuiEvent::Key(KeyCode::F(6).into())
+    ))
+    .await?;
     assert!(!app.transcript_view.is_following());
-    Box::pin(app.handle_tui_event(&mut tui, &mut server, TuiEvent::Key(KeyCode::End.into())))
-        .await?;
+    crate::boxed_future!(app.handle_tui_event(
+        &mut tui,
+        &mut server,
+        TuiEvent::Key(KeyCode::End.into())
+    ))
+    .await?;
     assert!(app.transcript_view.is_following());
 
     tui.screen_size_for_event(&TuiEvent::Resize(Size::new(180, 20)))?;
@@ -509,20 +519,36 @@ async fn opens_agent_transcript_beside_parent_and_returns_to_chooser() -> color_
         })
         .expect("agent resize footer");
     insta::assert_snapshot!(footer, @"Resize · ←/h →/l · Shift+←/→ 10 cols · Enter/Esc done");
-    Box::pin(app.handle_tui_event(&mut tui, &mut server, TuiEvent::Key(KeyCode::Enter.into())))
-        .await?;
+    crate::boxed_future!(app.handle_tui_event(
+        &mut tui,
+        &mut server,
+        TuiEvent::Key(KeyCode::Enter.into())
+    ))
+    .await?;
 
-    Box::pin(app.handle_tui_event(&mut tui, &mut server, TuiEvent::Key(KeyCode::F(3).into())))
-        .await?;
+    crate::boxed_future!(app.handle_tui_event(
+        &mut tui,
+        &mut server,
+        TuiEvent::Key(KeyCode::F(3).into())
+    ))
+    .await?;
     let screen = side_frame(&mut app, &mut tui, Size::new(140, 20))?;
     assert!(screen.contains("Find:"), "{screen}");
-    Box::pin(app.handle_tui_event(&mut tui, &mut server, TuiEvent::Key(KeyCode::Esc.into())))
-        .await?;
+    crate::boxed_future!(app.handle_tui_event(
+        &mut tui,
+        &mut server,
+        TuiEvent::Key(KeyCode::Esc.into())
+    ))
+    .await?;
     assert_eq!(app.current_displayed_thread_id(), Some(child));
-    Box::pin(app.handle_tui_event(&mut tui, &mut server, TuiEvent::Key(KeyCode::Esc.into())))
-        .await?;
+    crate::boxed_future!(app.handle_tui_event(
+        &mut tui,
+        &mut server,
+        TuiEvent::Key(KeyCode::Esc.into())
+    ))
+    .await?;
     while let Ok(event) = rx.try_recv() {
-        Box::pin(app.handle_event(&mut tui, &mut server, event)).await?;
+        crate::boxed_future!(app.handle_event(&mut tui, &mut server, event)).await?;
     }
     assert_eq!(app.current_displayed_thread_id(), Some(root));
     assert_eq!(app.docked_agent(), None);
@@ -540,11 +566,15 @@ async fn opens_agent_transcript_beside_parent_and_returns_to_chooser() -> color_
         Some(child)
     );
 
-    Box::pin(app.handle_tui_event(&mut tui, &mut server, TuiEvent::Key(KeyCode::Enter.into())))
-        .await?;
+    crate::boxed_future!(app.handle_tui_event(
+        &mut tui,
+        &mut server,
+        TuiEvent::Key(KeyCode::Enter.into())
+    ))
+    .await?;
     assert_eq!(app.docked_agent(), Some((root, child)));
     while let Ok(event) = rx.try_recv() {
-        Box::pin(app.handle_event(&mut tui, &mut server, event)).await?;
+        crate::boxed_future!(app.handle_event(&mut tui, &mut server, event)).await?;
     }
     let cell = crate::multi_agents::sub_agent_activity_history_cell(
         &ThreadItemPayload::SubAgentActivity {
@@ -560,7 +590,7 @@ async fn opens_agent_transcript_beside_parent_and_returns_to_chooser() -> color_
     app.insert_history_cell(&mut tui, Box::new(cell));
     Box::pin(app.select_agent_thread(&mut tui, &mut server, root)).await?;
     while let Ok(event) = rx.try_recv() {
-        Box::pin(app.handle_event(&mut tui, &mut server, event)).await?;
+        crate::boxed_future!(app.handle_event(&mut tui, &mut server, event)).await?;
     }
     let screen = side_frame(&mut app, &mut tui, Size::new(140, 20))?;
     let (row, column) = screen
@@ -583,9 +613,10 @@ async fn opens_agent_transcript_beside_parent_and_returns_to_chooser() -> color_
         app.transcript_link_at(click),
         Some(crate::terminal_hyperlinks::ReaderLink::Agent(nested))
     );
-    Box::pin(app.handle_tui_event(&mut tui, &mut server, TuiEvent::Mouse(click))).await?;
+    crate::boxed_future!(app.handle_tui_event(&mut tui, &mut server, TuiEvent::Mouse(click)))
+        .await?;
     while let Ok(event) = rx.try_recv() {
-        Box::pin(app.handle_event(&mut tui, &mut server, event)).await?;
+        crate::boxed_future!(app.handle_event(&mut tui, &mut server, event)).await?;
     }
     assert_eq!(app.current_displayed_thread_id(), Some(nested));
     assert_eq!(app.docked_agent(), Some((root, nested)));
@@ -605,19 +636,19 @@ async fn opens_agent_transcript_beside_parent_and_returns_to_chooser() -> color_
         MouseEventKind::Up(MouseButton::Left),
     ] {
         let click = crate::app::owned_transcript::tests::mouse(kind, close.x, close.y);
-        Box::pin(app.handle_tui_event(&mut tui, &mut server, click)).await?;
+        crate::boxed_future!(app.handle_tui_event(&mut tui, &mut server, click)).await?;
     }
     assert_eq!(app.current_displayed_thread_id(), Some(root));
     assert_eq!(app.docked_agent(), None);
     while let Ok(event) = rx.try_recv() {
-        Box::pin(app.handle_event(&mut tui, &mut server, event)).await?;
+        crate::boxed_future!(app.handle_event(&mut tui, &mut server, event)).await?;
     }
     assert!(!app.side_companions.contains_key(&child));
 
     // Closing a saved side chat can return to the last-used agent tab.
     app.open_sidebar_agent(&mut tui, &mut server, child).await?;
     while let Ok(event) = rx.try_recv() {
-        Box::pin(app.handle_event(&mut tui, &mut server, event)).await?;
+        crate::boxed_future!(app.handle_event(&mut tui, &mut server, event)).await?;
     }
     let started = server.start_thread(&config).await?;
     let side = started.session.thread_id;
@@ -634,7 +665,7 @@ async fn opens_agent_transcript_beside_parent_and_returns_to_chooser() -> color_
     app.activate_sidebar_tab(&mut tui, &mut server, SidebarTab::Chat(side))
         .await?;
     while let Ok(event) = rx.try_recv() {
-        Box::pin(app.handle_event(&mut tui, &mut server, event)).await?;
+        crate::boxed_future!(app.handle_event(&mut tui, &mut server, event)).await?;
     }
     assert_eq!(app.current_displayed_thread_id(), Some(side));
     app.close_sidebar_tab(&mut tui, &mut server, SidebarTab::Chat(side))
@@ -642,12 +673,16 @@ async fn opens_agent_transcript_beside_parent_and_returns_to_chooser() -> color_
     assert_eq!(app.current_displayed_thread_id(), Some(child));
     assert!(app.side_threads[&side].close_request.is_some());
     while let Ok(event) = rx.try_recv() {
-        Box::pin(app.handle_event(&mut tui, &mut server, event)).await?;
+        crate::boxed_future!(app.handle_event(&mut tui, &mut server, event)).await?;
     }
 
     app.keymap.app.close_sidebar_tab = vec![crate::key_hint::plain(KeyCode::F(8))];
-    Box::pin(app.handle_tui_event(&mut tui, &mut server, TuiEvent::Key(KeyCode::F(8).into())))
-        .await?;
+    crate::boxed_future!(app.handle_tui_event(
+        &mut tui,
+        &mut server,
+        TuiEvent::Key(KeyCode::F(8).into())
+    ))
+    .await?;
     assert_eq!(app.current_displayed_thread_id(), Some(root));
     assert!(app.sidebar().unwrap().agents.detail.is_none());
     server.shutdown().await?;

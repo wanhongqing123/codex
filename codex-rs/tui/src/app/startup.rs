@@ -1350,9 +1350,11 @@ See the Codex keymap documentation for supported actions and examples."
         let mut waiting_for_initial_session_configured = wait_for_initial_session_configured;
         let mut waiting_for_initial_session_header = true;
 
+        // MSVC can retain multi-MiB event-future construction temporaries in this poll frame.
+        // Use the non-inline factory here and in the loop; Box::pin alone retains them.
         #[cfg(not(debug_assertions))]
         let pre_loop_exit_reason = if let Some(latest_version) = upgrade_version {
-            let control = Box::pin(app.handle_event(
+            let control = crate::boxed_future!(app.handle_event(
                 tui,
                 &mut app_server,
                 AppEvent::InsertHistoryCell(Box::new(UpdateAvailableHistoryCell::new(
@@ -1668,7 +1670,7 @@ See the Codex keymap documentation for supported actions and examples."
                         // and protected-input drain when replay completes.
                         let had_visible_modal = app.chat_widget.has_active_modal()
                             && !app.awaiting_side_replay(tui);
-                        match Box::pin(app.handle_event(tui, backends.session_at_mut(event_session), event)).await {
+                        match crate::boxed_future!(app.handle_event(tui, backends.session_at_mut(event_session), event)).await {
                             Ok(AppRunControl::Continue) => {
                                 if is_initial_session_header {
                                     waiting_for_initial_session_header = false;
@@ -1728,7 +1730,7 @@ See the Codex keymap documentation for supported actions and examples."
                             {
                                 app.startup_protected_input_boundary = false;
                             }
-                            match app.handle_tui_event(tui, backends.session_at_mut(displayed_session), event).await {
+                            match crate::boxed_future!(app.handle_tui_event(tui, backends.session_at_mut(displayed_session), event)).await {
                                 Ok(control) => control,
                                 Err(err) if app.recover_transport_error(&err) => AppRunControl::Continue,
                             Err(err) => break Err(err),

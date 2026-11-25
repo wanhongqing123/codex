@@ -5,5 +5,5 @@ expression: "format!(\"{history}\\n{}\",\nrender_bottom_popup(&app.chat_widget,\
 ---
 • This conversation is unavailable. Its cached transcript and draft remain here; input is paused. Open the agent picker or return to the parent to continue.
 ⚠ A background Codex service is running v2.0.0, different from your Codex CLI
-  v0.167.1+multi-ai.e58bf8f523.
+  v0.172.0+multi-ai.3d86e43b07.
 › unavailable draft
