@@ -309,6 +309,10 @@ pub(super) fn sandbox_check(config: &Config, arg0_paths: &Arg0DispatchPaths) -> 
                             "this build does not ship codex-windows-sandbox-setup.exe; install a \
                              distribution that includes it, or use the non-admin sandbox"
                         }
+                        SetupErrorCode::RegisteredServiceTimedOut
+                        | SetupErrorCode::RegisteredServicePipeClosed => {
+                            "check that the Codex sandbox service is running and let pending setup finish before retrying"
+                        }
                         SetupErrorCode::OrchestratorPayloadSerializeFailed
                         | SetupErrorCode::HelperRequestArgsFailed
                         | SetupErrorCode::HelperUnknownError => {

@@ -119,6 +119,33 @@ async fn remote_im_status_uses_markdown_pre_render_text() {
 }
 
 #[tokio::test]
+async fn remote_im_status_only_reports_available_server_version() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let address = "ws://devbox.example.com:4500";
+    for (version, expected_line) in [
+        (None, "- **Remote**: ws://devbox.example.com:4500"),
+        (
+            Some("v0.133.0".to_string()),
+            "- **Remote**: ws://devbox.example.com:4500 (v0.133.0)",
+        ),
+    ] {
+        chat.remote_connection = Some(crate::status::remote_connection::RemoteConnectionStatus {
+            address: address.to_string(),
+            version,
+            is_local_daemon: false,
+            is_managed_daemon: false,
+        });
+
+        let text = chat.add_status_output_from_remote_im();
+        let remote_line = text
+            .lines()
+            .find(|line| line.starts_with("- **Remote**:"))
+            .expect("remote connection status line");
+        assert_eq!(remote_line, expected_line);
+    }
+}
+
+#[tokio::test]
 async fn status_command_uses_catalog_default_reasoning_when_config_empty() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
     chat.config.model_reasoning_effort = None;
@@ -565,7 +592,7 @@ async fn status_command_requests_thread_usage_for_remote_connection_metadata() {
     );
     chat.remote_connection = Some(crate::status::remote_connection::RemoteConnectionStatus {
         address: "wss://remote.example.com".to_string(),
-        version: "v1.0.0".to_string(),
+        version: Some("v1.0.0".to_string()),
         is_local_daemon: false,
         is_managed_daemon: false,
     });

@@ -119,8 +119,9 @@ impl StatusHistoryHandle {
     pub(crate) fn set_thread_usage(
         &self,
         estimate: Option<codex_app_server_protocol::ThreadUsage>,
+        plan: Option<PlanType>,
     ) {
-        self.card.thread_usage.set_estimate(estimate);
+        self.card.thread_usage.set_estimate(estimate, plan);
     }
 }
 
@@ -142,7 +143,6 @@ struct StatusHistoryCell {
     token_usage: StatusTokenUsageData,
     rate_limit_state: Arc<RwLock<StatusRateLimitState>>,
     thread_usage: StatusThreadUsage,
-    plan_type: Option<PlanType>,
 }
 
 #[cfg(test)]
@@ -470,7 +470,6 @@ impl StatusHistoryCell {
             agents_summary,
             rate_limit_state,
             thread_usage,
-            plan_type: _plan_type,
         }
     }
 
@@ -625,9 +624,16 @@ impl StatusHistoryCell {
         }
 
         if let Some(remote_connection) = self.remote_connection.as_ref() {
+            // Match the terminal status row: an unavailable server version is
+            // absent, rather than a fabricated value or an empty pair of brackets.
+            let version_suffix = remote_connection
+                .version
+                .as_ref()
+                .map(|version| format!(" ({version})"))
+                .unwrap_or_default();
             lines.push(format!(
-                "- **Remote**: {} ({})",
-                remote_connection.address, remote_connection.version
+                "- **Remote**: {}{version_suffix}",
+                remote_connection.address
             ));
         }
 
@@ -1050,12 +1056,11 @@ impl StatusHistoryCell {
             let value = if remote_connection.is_local_daemon {
                 Line::from("Local background server")
             } else {
-                Line::from(vec![
-                    Span::from(remote_connection.address.clone()),
-                    Span::from(" (").dim(),
-                    Span::from(remote_connection.version.clone()).dim(),
-                    Span::from(")").dim(),
-                ])
+                let mut spans = vec![remote_connection.address.clone().into()];
+                if let Some(version) = &remote_connection.version {
+                    spans.push(format!(" ({version})").dim());
+                }
+                Line::from(spans)
             };
             let wrapped_remote = word_wrap_lines([value], RtOptions::new(value_width.max(1)));
             let mut wrapped_remote = wrapped_remote.into_iter();
@@ -1120,9 +1125,7 @@ impl StatusHistoryCell {
         }
 
         lines.extend(self.rate_limit_lines(&rate_limit_state, available_width, &formatter));
-        let thread_usage_lines = self
-            .thread_usage
-            .lines(&formatter, value_width, self.plan_type);
+        let thread_usage_lines = self.thread_usage.lines(&formatter, value_width);
         if !thread_usage_lines.is_empty() {
             lines.push(Line::from(Vec::<Span<'static>>::new()));
             lines.extend(thread_usage_lines);

@@ -5,6 +5,7 @@
 mod request;
 pub(super) use request::ReviewAuthorization;
 
+use crate::guardian_review::ReviewRetrieval;
 use codex_analytics::GuardianApprovalRequestSource;
 use codex_analytics::GuardianReviewAnalyticsResult;
 use codex_core_plugins::PluginCommandAttribution;
@@ -105,6 +106,7 @@ pub(super) struct GuardianReviewSessionConfig {
     pub(super) spawn_config: crate::config::Config,
     pub(super) node_repl_policy: GuardianNodeReplPolicy,
     review_model: ReviewModel,
+    default_reasoning_effort: Option<codex_protocol::openai_models::ReasoningEffort>,
 }
 
 /// Selects the thread's reviewer and leaves configuration resolution under the caller's deadline.
@@ -117,13 +119,14 @@ fn select_synchronous_reviewer(
 )> {
     Some((
         session.guardian_review_session()?,
-        guardian_review_session_config(session, context),
+        guardian_review_session_config(session, context, ReviewRetrieval::ConversationHistory),
     ))
 }
 
 pub(super) async fn guardian_review_session_config(
     session: &Session,
     context: &GuardianReviewContext,
+    retrieval: ReviewRetrieval,
 ) -> anyhow::Result<GuardianReviewSessionConfig> {
     let turn = context.turn();
     let network_proxy = session.services.network_proxy.load_full();
@@ -147,6 +150,7 @@ pub(super) async fn guardian_review_session_config(
         context.reasoning_summary,
         context.personality,
         model_messages,
+        retrieval,
     )?;
     if context.model_info.computer_use_review_required() {
         spawn_config
@@ -166,6 +170,7 @@ pub(super) async fn guardian_review_session_config(
         spawn_config,
         node_repl_policy: GuardianNodeReplPolicy::from_messages(model_messages),
         review_model,
+        default_reasoning_effort: guardian_model_info.default_reasoning_level.clone(),
     })
 }
 
@@ -194,8 +199,6 @@ impl ReviewInput {
         GuardianReviewSessionParams {
             parent_session: self.session,
             parent_history: self.history,
-            reasoning_summary: self.context.reasoning_summary,
-            personality: self.context.personality,
             parent_context: self.context,
             spawn_config: config.spawn_config,
             node_repl_policy: config.node_repl_policy,
@@ -210,45 +213,33 @@ impl ReviewInput {
         }
     }
 
-    /// Assess the supplied request in a fresh reviewer without publishing a live approval.
+    /// Assess the recorded call in a Guardian session separate from the actor.
+    /// The parent can reuse that session across calls.
+    /// The caller enforces the deadline and cancellation during setup.
     pub(super) async fn assess_isolated(
         self,
         deadline: ReviewDeadline,
         cancellation: &CancellationToken,
     ) -> Result<GuardianAssessment, GuardianReviewError> {
-        let review = async {
-            let (pool, config) = select_synchronous_reviewer(&self.session, &self.context)
-                .ok_or_else(|| {
-                    GuardianReviewError::session(anyhow::anyhow!(
-                        "Guardian reviewer is unavailable"
-                    ))
-                })?;
-            let config = config.await.map_err(GuardianReviewError::prompt_build)?;
-            let category = self.request.guardian_scope();
-            let params = self.into_params(
-                config,
-                category,
-                ReviewAttemptOptions {
-                    authorization: None,
-                    external_cancel: Some(cancellation.clone()),
-                    deadline,
-                },
-            );
-            let prepared = super::review_session::prepare_review(params)
-                .await
-                .map_err(GuardianReviewError::prompt_build)?;
-            Ok::<_, GuardianReviewError>(pool.review_isolated(&prepared).await.0)
-        };
-        let outcome = match run_before_review_deadline(
-            deadline,
-            Some(cancellation),
-            Box::pin(review),
-        )
-        .await
-        {
-            Ok(result) => result?,
-            Err(interruption) => interruption,
-        };
+        let (pool, config) =
+            select_synchronous_reviewer(&self.session, &self.context).ok_or_else(|| {
+                GuardianReviewError::session(anyhow::anyhow!("Guardian reviewer is unavailable"))
+            })?;
+        let config = config.await.map_err(GuardianReviewError::prompt_build)?;
+        let category = self.request.guardian_scope();
+        let params = self.into_params(
+            config,
+            category,
+            ReviewAttemptOptions {
+                authorization: None,
+                external_cancel: Some(cancellation.clone()),
+                deadline,
+            },
+        );
+        let (outcome, _) = Box::pin(super::review_session::run_guardian_review_session(
+            pool, params,
+        ))
+        .await;
         outcome.into_assessment()
     }
 }

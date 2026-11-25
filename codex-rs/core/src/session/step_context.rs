@@ -31,6 +31,8 @@ pub(crate) struct StepContext {
     /// Final serving value for this invocation; retained by its code cell across waits.
     pub(crate) serving_assessment: Option<Arc<crate::guardian::ServingAssessment>>,
     pub(crate) turn: Arc<TurnContext>,
+    /// Cancels work owned by this turn, independently of steers or session shutdown.
+    pub(crate) turn_cancellation: CancellationToken,
     /// Preempts this request and yields its code-mode observations when user input arrives.
     pub(crate) preempt: Option<CancellationToken>,
     /// Realtime call activity and instructions captured for this sampling request.
@@ -62,11 +64,13 @@ impl StepContext {
         if self.settings.model_info.use_responses_lite {
             Some(Feature::IncrementalTools)
         } else {
-            matches!(
-                self.turn.config.model_provider_id.as_str(),
-                AMAZON_BEDROCK_PROVIDER_ID | AMAZON_BEDROCK_RUNTIME_PROVIDER_ID | GCP_PROVIDER_ID
-            )
-            .then_some(Feature::IncrementalToolsLegacy)
+            match self.turn.config.model_provider_id.as_str() {
+                AMAZON_BEDROCK_PROVIDER_ID | AMAZON_BEDROCK_RUNTIME_PROVIDER_ID => {
+                    Some(Feature::IncrementalToolsLegacy)
+                }
+                GCP_PROVIDER_ID => Some(Feature::IncrementalToolsLegacyGcp),
+                _ => None,
+            }
         }
     }
 
